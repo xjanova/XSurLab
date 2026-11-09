@@ -12,7 +12,7 @@
     <DockPanel Margin="0,0,0,22">
       <StackPanel DockPanel.Dock="Left">
         <TextBlock Text="XSurLab" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource Accent}"/>
-        <TextBlock Text="SURROUND STUDIO / 0.3" Style="{StaticResource Label}" Margin="1,5,0,0"/>
+        <TextBlock Text="SURROUND STUDIO / 0.5" Style="{StaticResource Label}" Margin="1,5,0,0"/>
       </StackPanel>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
         <Button Content="Undo" Click="Undo_Click" IsEnabled="{Binding CanUndo}" ToolTip="{Binding UndoText}" ToolTipService.ShowOnDisabled="True" AutomationProperties.HelpText="{Binding UndoText}"/>
