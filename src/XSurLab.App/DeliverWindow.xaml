@@ -1,0 +1,46 @@
+<Window x:Class="XSurLab.App.DeliverWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Title="Deliver · XSurLab" Width="600" SizeToContent="Height" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+ Background="#11151A" Foreground="#E4E9EF" FontFamily="Segoe UI" FontSize="13" ShowInTaskbar="False">
+  <Border Style="{StaticResource Card}" Margin="16">
+    <StackPanel>
+      <TextBlock Text="DELIVER" Style="{StaticResource Label}"/>
+      <TextBlock Text="One render writes every file at the same length, checks that the stems sum to the mix and writes a QC report with SHA-256 hashes." Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,14"/>
+      <TextBlock Text="MIX FILE" Style="{StaticResource Label}"/>
+      <DockPanel Margin="0,0,0,12">
+        <Button DockPanel.Dock="Right" Content="Browse…" Click="Browse_Click" Margin="8,0,0,0"/>
+        <TextBox Text="{Binding MixPath, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="Delivery mix file"/>
+      </DockPanel>
+      <CheckBox Content="{Binding MixLabel}" IsChecked="{Binding Mix}" AutomationProperties.Name="Deliver the interleaved mix"/>
+      <CheckBox Content="{Binding MonoLabel}" IsChecked="{Binding MultiMono}" AutomationProperties.Name="Deliver multi-mono files"/>
+      <CheckBox Content="{Binding StemLabel}" IsChecked="{Binding Stems}" AutomationProperties.Name="Deliver stems by group"/>
+      <Grid Margin="0,8,0,12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <StackPanel Margin="0,0,16,0">
+          <TextBlock Text="LOUDNESS TARGET" Style="{StaticResource Label}"/>
+          <ComboBox ItemsSource="{Binding Targets}" SelectedValue="{Binding Target}" SelectedValuePath="Target" Width="230" AutomationProperties.Name="Loudness target"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1">
+          <TextBlock Text="FORMAT" Style="{StaticResource Label}"/>
+          <TextBlock Text="{Binding FormatText}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+        </StackPanel>
+      </Grid>
+      <TextBlock Text="{Binding PlannedTitle}" Style="{StaticResource Label}"/>
+      <Border Background="#10141A" BorderBrush="{StaticResource Line}" BorderThickness="1" Padding="10,6" MaxHeight="150">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <ItemsControl ItemsSource="{Binding Planned}" AutomationProperties.Name="Files to write">
+            <ItemsControl.ItemTemplate><DataTemplate>
+              <TextBlock Text="{Binding}" FontFamily="Consolas" FontSize="11" Margin="0,1"/>
+            </DataTemplate></ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </Border>
+      <TextBlock Text="{Binding Warning}" Foreground="#E0A060" FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+        <Button Content="Cancel" IsCancel="True"/>
+        <Button Content="Deliver →" Click="Deliver_Click" IsDefault="True" IsEnabled="{Binding CanDeliver}" Margin="0" Background="#3E3527" BorderBrush="{StaticResource Accent}"/>
+      </StackPanel>
+    </StackPanel>
+  </Border>
+</Window>

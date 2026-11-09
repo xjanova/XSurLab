@@ -10,6 +10,8 @@ public sealed record TrackSettings
     public Guid Id { get; init; } = Guid.NewGuid();
     public string Name { get; init; } = "Audio";
     public string MediaPath { get; init; } = "";
+    /// <summary>Stem this track belongs to, such as DX, MX or FX. Empty tracks go to the "Other" stem.</summary>
+    public string Group { get; init; } = "";
     public double GainDb { get; init; }
     public double Azimuth { get; init; }
     /// <summary>Degrees above ear level, 0–90. Heard only on layouts with height speakers.</summary>
@@ -63,6 +65,8 @@ public static class SessionStore
                 throw new InvalidDataException("Track IDs must be unique.");
             if (string.IsNullOrWhiteSpace(track.Name) || track.Name.Length > 200 || string.IsNullOrWhiteSpace(track.MediaPath))
                 throw new InvalidDataException("Each track needs a name and a media path.");
+            if (track.Group is null || track.Group.Length > 40 || track.Group.Trim() != track.Group || track.Group.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || track.Group.Contains('.'))
+                throw new InvalidDataException("A group name has up to 40 characters, no dots or leading/trailing spaces, and must be valid in a file name.");
             Range(track.GainDb, -60, 12, "Track gain");
             Range(track.Azimuth, -180, 180, "Azimuth");
             Range(track.Elevation, 0, 90, "Elevation");

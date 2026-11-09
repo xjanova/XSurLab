@@ -37,6 +37,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private SampleFormat exportFormat = SampleFormat.Pcm24;
     private bool exportDither = true, exportBroadcast = true;
     private bool showEq;
+    private string? lastDelivery;
     private int eqBand = 2;
     private string momentaryText = "M   —", shortTermText = "S   —", integratedText = "I   — LUFS", truePeakText = "TP  — dBTP";
 
@@ -141,7 +142,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private void TrackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName != nameof(TrackViewModel.Name));
+        Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName is not (nameof(TrackViewModel.Name) or nameof(TrackViewModel.Group) or nameof(TrackViewModel.Summary)));
         if (e.PropertyName == nameof(TrackViewModel.Eq) && ReferenceEquals(sender, Selected)) BandChanged();
     }
     private void RefreshTracks()
@@ -338,6 +339,36 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var result = await RenderAsync(dialog.FileName);
         if (result is not null) Status = $"Exported {result.Channels}-channel PCM · {Path.GetFileName(dialog.FileName)}";
     }
+    private async void Deliver_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanRender) return;
+        StopPlayback();
+        var export = new ExportOptions { Format = ExportFormat, Dither = ExportDither, BroadcastWave = ExportBroadcast };
+        var document = Snapshot();
+        string folder = sessionPath is not null ? Path.GetDirectoryName(Path.GetFullPath(sessionPath))! : Environment.GetFolderPath(Environment.SpecialFolder.MyMusic);
+        string suggested = lastDelivery ?? Path.Combine(folder, string.Concat(SessionName.Split(Path.GetInvalidFileNameChars())).Replace('.', '_').Trim() is { Length: > 0 } n ? n + ".wav" : "Mix.wav");
+        var dialog = new DeliverWindow(document, suggested, export, Layouts.First(l => l.Layout == Layout).Name) { Owner = this };
+        if (dialog.ShowDialog() != true || dialog.Options is not { } options) return;
+        lastDelivery = dialog.MixPath;
+        SetBusy(true); operation = new CancellationTokenSource();
+        try
+        {
+            var media = Tracks.Select(t => new LoadedTrack(t.Snapshot, t.Audio)).ToArray();
+            var token = operation.Token;
+            var progress = new Progress<double>(p => Status = $"Delivering · {p:P0}");
+            Status = "Delivering…";
+            var report = await Task.Run(() => Delivery.Deliver(dialog.MixPath, document, media, options, token, progress), token);
+            var failed = report.Checks.Where(c => !c.Passed).ToArray();
+            Status = $"Delivered {report.Files.Count} file(s) · QC {(report.Passed ? "PASS" : "FAIL")} · {Path.GetFileNameWithoutExtension(dialog.MixPath)}.qc.txt";
+            RenderSummary = failed.Length == 0 ? "All QC checks passed." : "QC: " + string.Join(" · ", failed.Select(c => $"{c.Name} ({c.Detail})"));
+            MessageBox.Show(this, string.Join("\n", report.Checks.Select(c => $"{(c.Passed ? "PASS" : "FAIL")}  {c.Name} · {c.Detail}"))
+                + $"\n\n{report.Files.Count} file(s) in {Path.GetDirectoryName(dialog.MixPath)}",
+                report.Passed ? "Delivery QC · PASS" : "Delivery QC · FAIL", MessageBoxButton.OK, report.Passed ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        }
+        catch (OperationCanceledException) { Status = "Delivery cancelled · no file was replaced."; }
+        catch (Exception ex) { Error(ex); }
+        finally { operation.Dispose(); operation = null; SetBusy(false); }
+    }
     private async Task<RenderResult?> RenderAsync(string path)
     {
         SetBusy(true); operation = new CancellationTokenSource();
@@ -407,7 +438,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             RoutedEventHandler? action = e.Key switch
             {
-                Key.N => New_Click, Key.O => Open_Click, Key.S => Save_Click, Key.I => Import_Click, Key.E => Export_Click, _ => null
+                Key.N => New_Click, Key.O => Open_Click, Key.S => Save_Click, Key.I => Import_Click, Key.E => Export_Click, Key.D => Deliver_Click, _ => null
             };
             if (action is null || busy) return;
             e.Handled = true; action(this, new RoutedEventArgs());

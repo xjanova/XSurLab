@@ -23,7 +23,8 @@ public sealed class StreamingMixer
     /// <summary>Loudness and peaks of everything read so far, measured on the mixer output.</summary>
     public LoudnessMeter Meter { get; }
 
-    public StreamingMixer(SessionDocument session, IReadOnlyList<LoadedTrack> tracks, bool stereoMonitor = false)
+    /// <param name="length">Fixed output length in frames (silence pads the end), so stems line up with their mix.</param>
+    public StreamingMixer(SessionDocument session, IReadOnlyList<LoadedTrack> tracks, bool stereoMonitor = false, long? length = null)
     {
         SessionStore.Validate(session);
         if (!session.Tracks.SequenceEqual(tracks.Select(t => t.Settings)))
@@ -36,7 +37,7 @@ public sealed class StreamingMixer
         StereoMonitor = stereoMonitor;
         var speakers = SpatialMixer.Speakers(session.Layout);
         Channels = stereoMonitor ? 2 : speakers.Length;
-        TotalFrames = tracks.Max(t => (long)Math.Round(t.Settings.StartSeconds * SampleRate)
+        TotalFrames = length ?? tracks.Max(t => (long)Math.Round(t.Settings.StartSeconds * SampleRate)
             + (long)Math.Ceiling(t.Audio.Duration * SampleRate));
         if (TotalFrames <= 0 || TotalFrames > 3600L * SampleRate)
             throw new InvalidDataException("Render duration must be between zero and one hour.");

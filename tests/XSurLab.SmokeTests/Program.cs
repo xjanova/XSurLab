@@ -181,6 +181,69 @@ try
         for (int f = 0; f < 10; f++) Near(after[f * 2], dry[(4800 + f) * 2], .002);
         for (int f = live.RampFrames * 2; f < live.RampFrames * 4; f++) Near(after[f * 2], wet[(4800 + f) * 2], .001);
     });
+    Test("RF64 is written on request (and beyond 4 GiB) and reads back", () =>
+    {
+        var media = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 480).ToArray());
+        var track = Track("rf64.wav");
+        var path = Path.Combine(root, "forced.rf64.wav");
+        WaveRenderer.Render(path, Session(SpeakerLayout.Surround51, track), [new(track, media)], new() { Rf64 = true, Dither = false });
+        var bytes = File.ReadAllBytes(path);
+        Equal(Encoding.ASCII.GetString(bytes, 0, 4), "RF64"); Equal(BitConverter.ToUInt32(bytes, 4), uint.MaxValue);
+        Equal(Encoding.ASCII.GetString(bytes, 12, 4), "ds64"); Equal(BitConverter.ToUInt32(bytes, 16), 28u);
+        Equal(BitConverter.ToInt64(bytes, 20), (long)bytes.Length - 8); Equal(BitConverter.ToInt64(bytes, 28), 480L * 6 * 3); Equal(BitConverter.ToInt64(bytes, 36), 480L);
+        var back = WaveReader.Read(path);
+        Equal(back.Frames, 480L); Equal(back.Channels, 6); Near(back[100, 2], .25, 1e-6);
+        Equal(WaveReader.Read(path, stream: true)[479, 2], back[479, 2]);
+    });
+    Test("Delivery renders mix, multi-mono and stems in one pass and writes a QC report", () =>
+    {
+        var folder = Path.Combine(root, "delivery"); Directory.CreateDirectory(folder);
+        var tone = new AudioBuffer(48000, 1, Enumerable.Range(0, 4800).Select(i => (float)(.2 * Math.Sin(2 * Math.PI * 440 * i / 48000))).ToArray());
+        var noise = new AudioBuffer(48000, 1, Enumerable.Range(0, 2400).Select(i => (float)(.1 * Math.Sin(i * 1.7))).ToArray());
+        var dx = Track("dx.wav") with { Group = "DX" };
+        var mx = Track("mx.wav") with { Group = "MX", Azimuth = 110, StartSeconds = .02 };
+        var fx = Track("fx.wav") with { Azimuth = -60, LfeDb = -6 };
+        var session = Session(SpeakerLayout.Surround51, dx, mx, fx) with { Name = "Delivery test" };
+        LoadedTrack[] loaded = [new(dx, tone), new(mx, noise), new(fx, noise)];
+        var options = new DeliveryOptions
+        {
+            MultiMono = true, Stems = true, Target = LoudnessTarget.EbuR128, Export = new() { Dither = false, Created = new DateTime(2026, 11, 9, 12, 0, 0) }
+        };
+        var mixPath = Path.Combine(folder, "Film.wav");
+        var planned = Delivery.PlannedFiles(mixPath, session, options);
+        Equal(planned.Count, 1 + 6 + 3 + 2);
+        var report = Delivery.Deliver(mixPath, session, loaded, options);
+        foreach (var file in planned) Check(File.Exists(file), $"{Path.GetFileName(file)} is delivered");
+        Check(!Directory.EnumerateFiles(folder, "*.tmp").Any(), "No temporary files remain");
+        var mixAudio = WaveReader.Read(mixPath);
+        foreach (var (speaker, c) in SpatialMixer.Speakers(SpeakerLayout.Surround51).Select((s, c) => (s, c)))
+        {
+            var monoAudio = WaveReader.Read(Path.Combine(folder, $"Film.{speaker.Name}.wav"));
+            Equal(monoAudio.Channels, 1); Equal(monoAudio.Frames, mixAudio.Frames);
+            for (long f = 0; f < mixAudio.Frames; f += 97) Equal(monoAudio[f, 0], mixAudio[f, c]);
+        }
+        foreach (var stem in new[] { "DX", "MX", "Other" }) Equal(WaveReader.Read(Path.Combine(folder, $"Film_{stem}.wav")).Frames, mixAudio.Frames);
+        Check(report.Checks.Single(c => c.Name == "Stems sum to the mix").Passed, "Stems must sum to the mix");
+        Check(report.Checks.Single(c => c.Name == "No track is soloed").Passed, "Nothing is soloed");
+        Check(!report.Checks.Single(c => c.Name.StartsWith("Integrated")).Passed && !report.Passed, "A quiet test mix misses the R128 target");
+        using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(planned[^2])))
+        {
+            var first = doc.RootElement.GetProperty("Files")[0];
+            Equal(first.GetProperty("Sha256").GetString(), Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(mixPath))));
+            Equal(doc.RootElement.GetProperty("Passed").GetBoolean(), false);
+        }
+        Check(File.ReadAllText(planned[^1]).Contains("FAIL  Integrated loudness -23 ±1 LUFS"), "The text report lists the failed check");
+        Check(File.ReadAllBytes(planned[^1]).AsSpan().StartsWith((byte[])[0xEF, 0xBB, 0xBF]), "The text report starts with a UTF-8 BOM");
+        Check(File.ReadAllBytes(planned[^2])[0] == (byte)'{', "The JSON report has no BOM");
+        Equal(report.Files.Single(f => f.Name == "Film.LFE.wav").SilentChannels.Length, 0);
+        Throws<IOException>(() => Delivery.Deliver(mixPath, session, loaded, options));
+        var soloDx = dx with { Solo = true };
+        var again = Delivery.Deliver(mixPath, session with { Tracks = [soloDx, mx, fx] }, [new(soloDx, tone), new(mx, noise), new(fx, noise)], options with { Overwrite = true });
+        Check(!again.Checks.Single(c => c.Name == "No track is soloed").Passed && !again.Checks.Single(c => c.Name == "Stems sum to the mix").Passed,
+            "Solo is flagged and breaks the stem sum");
+        Throws<InvalidDataException>(() => SessionStore.Validate(session with { Tracks = [dx with { Group = "D/X" }] }));
+        Throws<InvalidDataException>(() => SessionStore.Validate(session with { Tracks = [dx with { Group = "a.b" }] }));
+    });
     Test("Session v2 stores elevation, spread and height layouts; v1 files still load", () =>
     {
         var v1 = Path.Combine(root, "v1.xsurlab.json");

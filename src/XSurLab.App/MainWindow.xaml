@@ -52,7 +52,7 @@
           </StackPanel>
           <StackPanel DockPanel.Dock="Bottom" Margin="4,12,4,0">
             <Button Content="Remove selected track" Click="Remove_Click" IsEnabled="{Binding CanEditSelected}" Margin="0,0,0,12"/>
-            <TextBlock Text="Mono, stereo or multichannel WAV · 32 tracks&#10;Space play/stop · Esc stop · Ctrl+E export" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
+            <TextBlock Text="Mono, stereo or multichannel WAV · 32 tracks&#10;Space play/stop · Esc stop · Ctrl+E export · Ctrl+D deliver" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
           </StackPanel>
           <ListBox ItemsSource="{Binding Tracks}" SelectedItem="{Binding Selected}" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" IsEnabled="{Binding CanEdit}">
             <ListBox.ItemContainerStyle>
@@ -64,9 +64,7 @@
               <StackPanel>
                 <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" Foreground="#DDB879"/>
                 <TextBlock Text="{Binding Description}" FontSize="11" Foreground="#8C99AA" Margin="0,5,0,0" TextWrapping="Wrap"/>
-                <TextBlock Foreground="#8C99AA" FontSize="11" Margin="0,4,0,0">
-                  <Run Text="{Binding GainDb, StringFormat='{}{0:F1} dB'}"/><Run Text="   /   "/><Run Text="{Binding Azimuth, StringFormat='{}{0:F0}°'}"/>
-                </TextBlock>
+                <TextBlock Text="{Binding Summary}" Foreground="#8C99AA" FontSize="11" Margin="0,4,0,0"/>
               </StackPanel>
             </DataTemplate></ListBox.ItemTemplate>
           </ListBox>
@@ -135,6 +133,8 @@
                 <TextBlock Text="{Binding Selected.LfeDb, StringFormat='LFE SEND / {0:F1} dB'}"/>
                 <Slider Value="{Binding Selected.LfeDb}" Minimum="-60" Maximum="0" TickFrequency=".5" AutomationProperties.Name="LFE send" IsEnabled="{Binding CanSendLfe}"/>
                 <TextBlock Text="−60 dB = off · 120 Hz low-pass" Style="{StaticResource Label}"/>
+                <TextBlock Text="GROUP / STEM" Style="{StaticResource Label}" Margin="0,4,0,8"/>
+                <TextBox Text="{Binding Selected.Group, UpdateSourceTrigger=LostFocus, ValidatesOnExceptions=True}" AutomationProperties.Name="Track group" ToolTip="Stem name for Deliver, e.g. DX, MX, FX. Empty = Other." MaxLength="40" Margin="0,0,0,12"/>
                 <TextBlock Text="START OFFSET / SECONDS" Style="{StaticResource Label}"/>
                 <TextBox Text="{Binding Selected.StartSeconds, UpdateSourceTrigger=LostFocus, ValidatesOnExceptions=True}" AutomationProperties.Name="Track start offset"/>
               </StackPanel>
@@ -185,6 +185,7 @@
           <ComboBox ItemsSource="{Binding Formats}" SelectedValue="{Binding ExportFormat}" SelectedValuePath="Format" Width="128" IsEnabled="{Binding CanEdit}" AutomationProperties.Name="Export sample format" Margin="0,0,10,0"/>
           <CheckBox Content="Dither" IsChecked="{Binding ExportDither}" IsEnabled="{Binding CanDither}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="TPDF dither of ±1 LSB before 16/24-bit quantisation"/>
           <CheckBox Content="BWF" IsChecked="{Binding ExportBroadcast}" IsEnabled="{Binding CanEdit}" VerticalAlignment="Center" Margin="0,0,12,0" ToolTip="Write a Broadcast WAV bext chunk with the measured loudness"/>
+          <Button Content="Deliver…" Click="Deliver_Click" IsEnabled="{Binding CanRender}" ToolTip="Mix, multi-mono, stems and QC report · Ctrl+D"/>
           <Button Content="Export WAV →" Click="Export_Click" IsEnabled="{Binding CanRender}" Margin="0" Background="#3E3527" BorderBrush="{StaticResource Accent}" ToolTip="Ctrl+E"/>
         </StackPanel>
       </Grid>

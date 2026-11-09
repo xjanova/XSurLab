@@ -240,10 +240,22 @@ public static class WaveReader
     {
         var stream = reader.BaseStream;
         string Tag() => Encoding.ASCII.GetString(reader.ReadBytes(4));
-        if (Tag() != "RIFF") throw new InvalidDataException("Only RIFF WAV files are supported.");
-        long end = reader.ReadUInt32() + 8L;
-        if (Tag() != "WAVE" || end > stream.Length || end < 12)
-            throw new InvalidDataException("Invalid WAV container length.");
+        var container = Tag();
+        if (container is not ("RIFF" or "RF64")) throw new InvalidDataException("Only RIFF and RF64 WAV files are supported.");
+        long end = reader.ReadUInt32() + 8L, data64 = -1;
+        if (Tag() != "WAVE") throw new InvalidDataException("Invalid WAV container.");
+        if (container == "RF64")
+        {
+            // EBU Tech 3306: ds64 comes first and carries the 64-bit RIFF and data sizes.
+            uint ds64 = Tag() == "ds64" ? reader.ReadUInt32() : 0;
+            if (ds64 < 28) throw new InvalidDataException("RF64 file without a ds64 chunk.");
+            long body = stream.Position;
+            ulong riff = reader.ReadUInt64(), data = reader.ReadUInt64();
+            if (riff > long.MaxValue - 8 || data > long.MaxValue) throw new InvalidDataException("Invalid RF64 sizes.");
+            end = (long)riff + 8; data64 = (long)data;
+            stream.Position = body + ds64 + (ds64 & 1);
+        }
+        if (end > stream.Length || end < 12) throw new InvalidDataException("Invalid WAV container length.");
         ushort format = 0, channels = 0, bits = 0, align = 0;
         int rate = 0;
         uint mask = 0;
@@ -254,7 +266,9 @@ public static class WaveReader
             cancellationToken.ThrowIfCancellationRequested();
             var tag = Tag();
             uint size = reader.ReadUInt32();
-            long next = stream.Position + size;
+            // In RF64 the data chunk's 32-bit size reads 0xFFFFFFFF and the real size lives in ds64.
+            long length = tag == "data" && size == uint.MaxValue && data64 >= 0 ? data64 : size;
+            long next = stream.Position + length;
             if (next > end) throw new InvalidDataException("WAV chunk extends beyond the container.");
             if (tag == "fmt ")
             {
@@ -292,9 +306,9 @@ public static class WaveReader
             {
                 if (dataOffset >= 0) throw new InvalidDataException("Use a WAV file with a single data chunk.");
                 dataOffset = stream.Position;
-                dataSize = size;
+                dataSize = length;
             }
-            stream.Position = next + (size & 1);
+            stream.Position = next + (length & 1);
             if (stream.Position > end) throw new InvalidDataException("Missing WAV chunk padding.");
         }
         if (!hasFormat || dataOffset < 0 || dataSize == 0 || dataSize % align != 0)

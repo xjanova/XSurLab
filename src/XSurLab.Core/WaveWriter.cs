@@ -16,10 +16,15 @@ public sealed record ExportOptions
     public string? Description { get; init; }
     public DateTime? Created { get; init; }
     public ulong DitherSeed { get; init; } = 0x5EED_C0DE_2026UL;
+    /// <summary>Writes EBU Tech 3306 RF64 even below 4 GiB. Larger files are always RF64.</summary>
+    public bool Rf64 { get; init; }
     public int BitsPerSample => Format switch { SampleFormat.Pcm16 => 16, SampleFormat.Pcm24 => 24, _ => 32 };
 }
 
-/// <summary>Writes one WAV file from interleaved samples. The frame count is fixed up front so the header is final.</summary>
+/// <summary>
+/// Writes one WAV file from interleaved samples. The frame count is fixed up front so the header is final: RIFF up to
+/// 4 GiB, RF64 with a ds64 chunk beyond that (or when asked), whose 32-bit sizes read 0xFFFFFFFF.
+/// </summary>
 internal sealed class WaveWriter : IDisposable
 {
     private static readonly Guid Pcm = new("00000001-0000-0010-8000-00aa00389b71");
@@ -43,12 +48,15 @@ internal sealed class WaveWriter : IDisposable
         var bext = options.BroadcastWave ? broadcast?.Encode() : null;
         dataBytes = checked(frames * align);
         long riff = 4 + 8 + fmtSize + (isFloat ? 12 : 0) + (bext is null ? 0 : 8 + bext.Length + (bext.Length & 1)) + 8 + dataBytes + (dataBytes & 1);
-        if (riff > uint.MaxValue) throw new InvalidDataException("Output exceeds the RIFF 4 GiB limit. Shorten the session.");
+        bool rf64 = options.Rf64 || riff > uint.MaxValue;
+        if (rf64) riff += 8 + 28;
         expected = frames * channels;
         stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 1 << 16);
         using var header = new BinaryWriter(stream, Encoding.ASCII, leaveOpen: true);
         void Tag(string id) => header.Write(Encoding.ASCII.GetBytes(id));
-        Tag("RIFF"); header.Write((uint)riff); Tag("WAVE");
+        uint Size(long value) => rf64 ? uint.MaxValue : (uint)value;
+        Tag(rf64 ? "RF64" : "RIFF"); header.Write(Size(riff)); Tag("WAVE");
+        if (rf64) { Tag("ds64"); header.Write(28u); header.Write(riff); header.Write(dataBytes); header.Write(frames); header.Write(0u); }
         if (bext is not null)
         {
             Tag("bext"); header.Write((uint)bext.Length);
@@ -64,8 +72,8 @@ internal sealed class WaveWriter : IDisposable
             header.Write((isFloat ? Float : Pcm).ToByteArray());
         }
         else if (isFloat) header.Write((ushort)0);
-        if (isFloat) { Tag("fact"); header.Write(4u); header.Write((uint)Math.Min(frames, uint.MaxValue)); }
-        Tag("data"); header.Write((uint)dataBytes);
+        if (isFloat) { Tag("fact"); header.Write(4u); header.Write(rf64 ? uint.MaxValue : (uint)frames); }
+        Tag("data"); header.Write(Size(dataBytes));
     }
 
     public void Write(ReadOnlySpan<double> samples)
