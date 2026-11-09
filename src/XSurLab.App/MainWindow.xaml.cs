@@ -3,6 +3,9 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using XSurLab.Audio;
 using XSurLab.Core;
@@ -29,9 +32,14 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private double monitorVolume = .5;
     private Task playbackStopped = Task.CompletedTask;
     private CancellationTokenSource? operation;
+    private readonly DispatcherTimer meterTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
+    private long meterFrames = -1;
+    private SampleFormat exportFormat = SampleFormat.Pcm24;
+    private bool exportDither = true, exportBroadcast = true;
+    private string momentaryText = "M   —", shortTermText = "S   —", integratedText = "I   — LUFS", truePeakText = "TP  — dBTP";
 
     public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit(audio: false); } }
-    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Edit(restart: true); } }
+    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Edit(restart: true); ResetMeters(); } }
     public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit(restart: true); } }
     public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit(); } }
     public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); } }
@@ -41,19 +49,48 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool CanRender => !busy && Tracks.Count > 0;
     public bool CanPlay => CanRender && SelectedOutput is not null;
     public AudioDevice? SelectedOutput { get => selectedOutput; set { if (selectedOutput == value) return; StopPlayback(); selectedOutput = value; Changed(); Changed(nameof(CanPlay)); } }
-    public bool StereoMonitor { get => stereoMonitor; set { if (stereoMonitor == value) return; StopPlayback(); stereoMonitor = value; Changed(); } }
+    public bool StereoMonitor { get => stereoMonitor; set { if (stereoMonitor == value) return; StopPlayback(); stereoMonitor = value; Changed(); ResetMeters(); } }
     public double MonitorVolume { get => monitorVolume; set { monitorVolume = Math.Clamp(value, 0, 1); if (player is not null) player.Volume = monitorVolume; Changed(); } }
     public bool CanEditSelected => !busy && Selected is not null;
     public bool HasLfe => Layout != SpeakerLayout.Stereo;
     public string OutputLabels => string.Join(" / ", SpatialMixer.Speakers(Layout).Select(s => s.Name));
     public string TrackSummary => $"{Tracks.Count} / 32 tracks · media stays linked";
+    public FormatOption[] Formats { get; } = [new(SampleFormat.Pcm24, "PCM 24-bit"), new(SampleFormat.Pcm16, "PCM 16-bit"), new(SampleFormat.Float32, "Float 32-bit")];
+    public SampleFormat ExportFormat { get => exportFormat; set { exportFormat = value; Changed(); Changed(nameof(CanDither)); } }
+    public bool ExportDither { get => exportDither; set { exportDither = value; Changed(); } }
+    public bool ExportBroadcast { get => exportBroadcast; set { exportBroadcast = value; Changed(); } }
+    public bool CanDither => CanEdit && ExportFormat != SampleFormat.Float32;
+    public string MomentaryText { get => momentaryText; private set { momentaryText = value; Changed(); } }
+    public string ShortTermText { get => shortTermText; private set { shortTermText = value; Changed(); } }
+    public string IntegratedText { get => integratedText; private set { integratedText = value; Changed(); } }
+    public string TruePeakText { get => truePeakText; private set { truePeakText = value; Changed(); } }
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContext = this;
-        Loaded += async (_, _) => await RefreshOutputsAsync();
+        meterTimer.Tick += MeterTick;
+        Loaded += async (_, _) =>
+        {
+            ResetMeters(); meterTimer.Start();
+            await RefreshOutputsAsync();
+            await OpenFilesAsync(Environment.GetCommandLineArgs().Skip(1).ToArray());
+        };
+        AllowDrop = true;
+        DragOver += (_, e) => { e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) && CanEdit ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; };
+        Drop += async (_, e) => { if (e.Data.GetData(DataFormats.FileDrop) is string[] files) await OpenFilesAsync(files); };
+    }
+
+    // A session file replaces the session (after the unsaved-changes prompt); WAV files are imported as tracks.
+    private async Task OpenFilesAsync(IReadOnlyList<string> files)
+    {
+        if (files.Count == 0 || busy) return;
+        var session = files.FirstOrDefault(f => f.EndsWith(".xsurlab.json", StringComparison.OrdinalIgnoreCase));
+        if (session is not null) { if (ConfirmDiscard()) await OpenAsync(session); return; }
+        var audio = files.Where(f => f.EndsWith(".wav", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (audio.Length > 0) await ImportAsync(audio);
+        else Status = "Drop WAV files or an .xsurlab.json session.";
     }
 
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
@@ -75,7 +112,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void SetBusy(bool value)
     {
         busy = value;
-        Changed(nameof(CanEdit)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected));
+        Changed(nameof(CanEdit)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected)); Changed(nameof(CanDither));
     }
     private void TrackChanged(object? sender, PropertyChangedEventArgs e) => Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName != nameof(TrackViewModel.Name));
     private void RefreshTracks()
@@ -110,16 +147,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         var dialog = new OpenFileDialog { Filter = "WAV audio|*.wav", Multiselect = true, Title = "Import mono / stereo PCM WAV" };
         if (dialog.ShowDialog(this) != true) return;
+        await ImportAsync(dialog.FileNames);
+    }
+    private async Task ImportAsync(IReadOnlyList<string> files)
+    {
+        if (busy) return;
         StopPlayback(); SetBusy(true); operation = new CancellationTokenSource();
         try
         {
-            if (Tracks.Count + dialog.FileNames.Length > 32) throw new InvalidDataException("A session supports up to 32 tracks.");
+            if (Tracks.Count + files.Count > 32) throw new InvalidDataException("A session supports up to 32 tracks.");
             var token = operation.Token;
             long used = Tracks.Sum(t => (long)t.Audio.Samples.Length * 4);
             Status = "Reading audio…";
-            var loaded = await Task.Run(() => LoadMedia(dialog.FileNames.Select(p => new TrackSettings
+            var loaded = await Task.Run(() => LoadMedia(files.Select(p => new TrackSettings
             {
-                Name = Path.GetFileNameWithoutExtension(p), MediaPath = p
+                Name = Path.GetFileNameWithoutExtension(p), MediaPath = Path.GetFullPath(p)
             }), used, token), token);
             foreach (var track in loaded) Add(track);
             Selected = loaded.FirstOrDefault();
@@ -151,16 +193,21 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!ConfirmDiscard()) return;
         var dialog = new OpenFileDialog { Filter = "XSurLab session|*.xsurlab.json|JSON|*.json" };
         if (dialog.ShowDialog(this) != true) return;
+        await OpenAsync(dialog.FileName);
+    }
+    private async Task OpenAsync(string file)
+    {
+        if (busy) return;
         StopPlayback(); SetBusy(true); operation = new CancellationTokenSource();
         try
         {
             var token = operation.Token;
-            var document = await Task.Run(() => SessionStore.Load(dialog.FileName), token);
+            var document = await Task.Run(() => SessionStore.Load(file), token);
             var loaded = await Task.Run(() => LoadMedia(document.Tracks, cancellationToken: token), token);
             ClearTracks();
             SessionName = document.Name; Layout = document.Layout; SampleRate = document.SampleRate; MasterGainDb = document.MasterGainDb;
             foreach (var track in loaded) Add(track);
-            Selected = Tracks.FirstOrDefault(); sessionPath = dialog.FileName;
+            Selected = Tracks.FirstOrDefault(); sessionPath = Path.GetFullPath(file);
             Saved(); RefreshTracks(); Status = "Session opened · all media resolved.";
         }
         catch (OperationCanceledException) { Status = "Operation cancelled."; }
@@ -226,6 +273,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (closed) return;
             var document = Snapshot();
             liveMixer = new StreamingMixer(document, Tracks.Select(t => new LoadedTrack(t.Snapshot, t.Audio)).ToArray(), StereoMonitor);
+            ResetMeters(); meterFrames = -1;
             var started = new Progress<PlaybackInfo>(info =>
             {
                 if (player != media || closed) return;
@@ -242,8 +290,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             await media.Completion;
             if (player != media || closed) return;
-            var peak = liveMixer!.Peak;
-            RenderSummary = $"Last monitor · sample peak {(peak > 0 ? 20 * Math.Log10(peak) : double.NegativeInfinity):F1} dBFS before monitor level.";
+            var report = liveMixer!.Meter.Report();
+            RenderSummary = $"Last monitor · {Lufs(report.Integrated)} LUFS · LRA {report.Range:F1} LU · {Db(report.TruePeakDb)} dBTP · before monitor level";
             StopPlayback(); Status = "Playback finished.";
         }
         catch (OperationCanceledException) { }
@@ -251,7 +299,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private async void Export_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new SaveFileDialog { Filter = "24-bit PCM WAV|*.wav", DefaultExt = ".wav", FileName = "XSurLab-mix.wav" };
+        if (!CanRender) return;
+        var dialog = new SaveFileDialog { Filter = "WAV audio|*.wav", DefaultExt = ".wav", FileName = "XSurLab-mix.wav" };
         if (dialog.ShowDialog(this) != true) return;
         StopPlayback();
         if (sessionPath is not null && string.Equals(Path.GetFullPath(dialog.FileName), Path.GetFullPath(sessionPath), StringComparison.OrdinalIgnoreCase))
@@ -269,8 +318,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var token = operation.Token;
             Status = "Rendering PCM WAV…";
             var progress = new Progress<double>(p => Status = $"Rendering PCM WAV · {p:P0}");
-            var result = await Task.Run(() => WaveRenderer.Render(path, document, media, cancellationToken: token, progress: progress), token);
-            RenderSummary = $"Last render · {result.Duration:F2} s · {result.SampleRate / 1000d:0.#} kHz · {result.Channels} ch · sample peak {result.PeakDb:F1} dBFS";
+            var options = new ExportOptions { Format = ExportFormat, Dither = ExportDither, BroadcastWave = ExportBroadcast };
+            var result = await Task.Run(() => WaveRenderer.Render(path, document, media, options, token, progress), token);
+            var loudness = result.Loudness;
+            RenderSummary = $"Last render · {result.Duration:F2} s · {result.SampleRate / 1000d:0.#} kHz · {result.Channels} ch · "
+                + $"{Lufs(loudness.Integrated)} LUFS · LRA {loudness.Range:F1} LU · {Db(loudness.TruePeakDb)} dBTP · sample peak {Db(result.PeakDb)} dBFS";
+            ResetMeters(); Meters.Show(loudness.ChannelPeaks);
             return result;
         }
         catch (OperationCanceledException) { Status = "Render cancelled · destination preserved."; return null; }
@@ -299,11 +352,51 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (busy) { operation?.Cancel(); e.Cancel = true; Status = "Cancelling work · close again when finished."; return; }
         if (!ConfirmDiscard()) { e.Cancel = true; return; }
-        closed = true; StopPlayback();
+        closed = true; meterTimer.Stop(); StopPlayback();
+    }
+
+    private void ResetMeters() => Meters.SetChannels(liveMixer is { StereoMonitor: true }
+        ? ["L", "R"] : SpatialMixer.Speakers(Layout).Select(s => s.Name).ToArray());
+    private void MeterTick(object? sender, EventArgs e)
+    {
+        var reading = liveMixer?.Meter.Latest;
+        if (reading is null || reading.Frames == meterFrames) { Meters.Show(null); return; }
+        meterFrames = reading.Frames;
+        Meters.Show(reading.ChannelPeaks);
+        MomentaryText = $"M   {Lufs(reading.Momentary)}";
+        ShortTermText = $"S   {Lufs(reading.ShortTerm)}";
+        IntegratedText = $"I   {Lufs(reading.Integrated)} LUFS";
+        TruePeakText = $"TP  {Db(reading.TruePeakDb)} dBTP";
+    }
+    private static string Lufs(double value) => double.IsFinite(value) ? value.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) : "—";
+    private static string Db(double value) => double.IsFinite(value) ? value.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) : "−∞";
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            RoutedEventHandler? action = e.Key switch
+            {
+                Key.N => New_Click, Key.O => Open_Click, Key.S => Save_Click, Key.I => Import_Click, Key.E => Export_Click, _ => null
+            };
+            if (action is null || busy) return;
+            e.Handled = true; action(this, new RoutedEventArgs());
+            return;
+        }
+        if (Keyboard.Modifiers != ModifierKeys.None) return;
+        if (e.Key == Key.Escape) { e.Handled = true; Stop_Click(this, new RoutedEventArgs()); }
+        // Space is the transport key everywhere except where it types or toggles.
+        else if (e.Key == Key.Space && Keyboard.FocusedElement is not (TextBoxBase or ToggleButton))
+        {
+            e.Handled = true;
+            if (player is not null) Stop_Click(this, new RoutedEventArgs());
+            else if (CanPlay) Play_Click(this, new RoutedEventArgs());
+        }
     }
 }
 
 public sealed record LayoutOption(SpeakerLayout Layout, string Name);
+public sealed record FormatOption(SampleFormat Format, string Name);
 
 
 

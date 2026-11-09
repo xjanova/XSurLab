@@ -88,6 +88,80 @@ public sealed class PannerView : FrameworkElement
 }
 
 
+/// <summary>Vertical sample-peak bars per output channel with 1.5 s peak hold; bars fall at 12 dB/s.</summary>
+public sealed class MeterView : FrameworkElement
+{
+    private const double Floor = -60, Fall = 12, Hold = 1.5, Scale = 26;
+    private static readonly int[] Ticks = [0, -6, -12, -18, -24, -36, -48, -60];
+    private readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+    private string[] labels = [];
+    private double[] bars = [], holds = [], ages = [];
+    private double last;
+
+    public void SetChannels(IReadOnlyList<string> names)
+    {
+        if (labels.SequenceEqual(names)) return;
+        labels = names.ToArray();
+        bars = Enumerable.Repeat(Floor, labels.Length).ToArray();
+        holds = (double[])bars.Clone(); ages = new double[labels.Length];
+        InvalidateVisual();
+    }
+
+    /// <summary>Feeds linear peaks of a new reading, or null when no new audio arrived since the last call.</summary>
+    public void Show(IReadOnlyList<double>? peaks)
+    {
+        double now = clock.Elapsed.TotalSeconds, elapsed = Math.Clamp(now - last, 0, .5);
+        last = now;
+        bool moving = false;
+        for (int c = 0; c < bars.Length; c++)
+        {
+            double level = peaks is not null && c < peaks.Count && peaks[c] > 0 ? Math.Max(Floor, 20 * Math.Log10(peaks[c])) : Floor;
+            double bar = Math.Max(level, bars[c] - Fall * elapsed);
+            if (level >= holds[c]) { holds[c] = level; ages[c] = 0; }
+            else if ((ages[c] += elapsed) > Hold) holds[c] = Math.Max(Floor, holds[c] - 20 * elapsed);
+            moving |= bar != bars[c] || holds[c] > Floor;
+            bars[c] = bar;
+        }
+        if (moving || peaks is not null) InvalidateVisual();
+    }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        dc.DrawRectangle(Brushes.Transparent, null, new(0, 0, ActualWidth, ActualHeight));
+        double top = 6, bottom = ActualHeight - 18, height = bottom - top;
+        if (labels.Length == 0 || height <= 20 || ActualWidth <= Scale + 10) return;
+        var dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var line = new Pen(new SolidColorBrush(Color.FromRgb(48, 57, 68)), 1);
+        var muted = new SolidColorBrush(Color.FromRgb(148, 162, 180));
+        double Y(double db) => top + (Math.Min(0, db) / Floor) * height;
+        foreach (int tick in Ticks)
+        {
+            dc.DrawLine(line, new(Scale - 3, Y(tick)), new(ActualWidth, Y(tick)));
+            var text = new FormattedText(tick.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                new Typeface("Consolas"), 9, muted, dpi);
+            dc.DrawText(text, new(Scale - 5 - text.Width, Y(tick) - text.Height / 2));
+        }
+        double column = (ActualWidth - Scale) / labels.Length, width = Math.Max(3, column - 4);
+        var teal = new SolidColorBrush(Color.FromRgb(115, 182, 200));
+        var amber = new SolidColorBrush(Color.FromRgb(221, 184, 121));
+        var red = new SolidColorBrush(Color.FromRgb(224, 108, 90));
+        var track = new SolidColorBrush(Color.FromRgb(16, 20, 26));
+        for (int c = 0; c < labels.Length; c++)
+        {
+            double x = Scale + c * column + (column - width) / 2;
+            dc.DrawRectangle(track, null, new(x, top, width, height));
+            if (bars[c] > Floor)
+            {
+                var fill = bars[c] > -1 ? red : bars[c] > -9 ? amber : teal;
+                dc.DrawRectangle(fill, null, new(x, Y(bars[c]), width, bottom - Y(bars[c])));
+            }
+            if (holds[c] > Floor) dc.DrawRectangle(holds[c] > -1 ? red : Brushes.WhiteSmoke, null, new(x, Y(holds[c]) - 1, width, 2));
+            var name = new FormattedText(labels[c], CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 9, muted, dpi);
+            dc.DrawText(name, new(x + width / 2 - name.Width / 2, bottom + 3));
+        }
+    }
+}
+
 public sealed class DisplayValueConverter : System.Windows.Data.IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) => value switch
@@ -97,6 +171,7 @@ public sealed class DisplayValueConverter : System.Windows.Data.IValueConverter
         SpeakerLayout.Surround71 => "7.1 Surround",
         SpeakerLayout.Surround51Back => "5.1 Back",
         LayoutOption option => option.Name,
+        FormatOption option => option.Name,
         XSurLab.Audio.AudioDevice device => device.DisplayName,
         int rate => $"{rate / 1000d:0.#} kHz",
         _ => value.ToString() ?? ""
