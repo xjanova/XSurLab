@@ -1,0 +1,140 @@
+﻿<Window x:Class="XSurLab.App.MainWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="clr-namespace:XSurLab.App"
+ Title="XSurLab · Surround Studio" Width="1240" Height="850" MinWidth="1000" MinHeight="720"
+ Background="#11151A" Foreground="#E4E9EF" FontFamily="Segoe UI" FontSize="13"
+ Closing="Window_Closing">
+  <Grid Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <DockPanel Margin="0,0,0,22">
+      <StackPanel DockPanel.Dock="Left">
+        <TextBlock Text="XSurLab" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource Accent}"/>
+        <TextBlock Text="SURROUND STUDIO / 0.1" Style="{StaticResource Label}" Margin="1,5,0,0"/>
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+        <Button Content="New" Click="New_Click" IsEnabled="{Binding CanEdit}"/>
+        <Button Content="Open session" Click="Open_Click" IsEnabled="{Binding CanEdit}"/>
+        <Button Content="Save session" Click="Save_Click" IsEnabled="{Binding CanEdit}"/>
+        <Button Content="+ Import WAV" Click="Import_Click" IsEnabled="{Binding CanEdit}" Background="#3E3527" BorderBrush="{StaticResource Accent}"/>
+      </StackPanel>
+    </DockPanel>
+    <Border Grid.Row="1" Style="{StaticResource Card}" Padding="18" Margin="0,0,0,18">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/><ColumnDefinition Width="120"/><ColumnDefinition Width="230"/></Grid.ColumnDefinitions>
+        <StackPanel IsEnabled="{Binding CanEdit}" Margin="0,0,20,0">
+          <TextBlock Text="SESSION" Style="{StaticResource Label}"/>
+          <TextBox Text="{Binding SessionName, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="Session name" MaxLength="200"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" IsEnabled="{Binding CanEdit}" Margin="0,0,14,0">
+          <TextBlock Text="SPEAKER LAYOUT" Style="{StaticResource Label}"/>
+          <ComboBox ItemsSource="{Binding Layouts}" SelectedItem="{Binding Layout}" AutomationProperties.Name="Speaker layout"/>
+        </StackPanel>
+        <StackPanel Grid.Column="2" IsEnabled="{Binding CanEdit}" Margin="0,0,14,0">
+          <TextBlock Text="SAMPLE RATE" Style="{StaticResource Label}"/>
+          <ComboBox ItemsSource="{Binding Rates}" SelectedItem="{Binding SampleRate}" AutomationProperties.Name="Sample rate"/>
+        </StackPanel>
+        <StackPanel Grid.Column="3">
+          <TextBlock Text="{Binding MasterGainDb, StringFormat='MASTER / {0:F1} dB'}" Style="{StaticResource Label}"/>
+          <Slider Value="{Binding MasterGainDb}" Minimum="-60" Maximum="6" TickFrequency=".5" Margin="0,5,0,0" IsEnabled="{Binding CanEdit}" AutomationProperties.Name="Master gain"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="2">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Border Style="{StaticResource Card}" Padding="14">
+        <DockPanel>
+          <StackPanel DockPanel.Dock="Top" Margin="5,4,5,15">
+            <TextBlock Text="SOURCE TRACKS" Style="{StaticResource Label}"/>
+            <TextBlock Text="{Binding TrackSummary}" FontSize="12"/>
+          </StackPanel>
+          <StackPanel DockPanel.Dock="Bottom" Margin="4,12,4,0">
+            <Button Content="Remove selected track" Click="Remove_Click" IsEnabled="{Binding CanEditSelected}" Margin="0,0,0,12"/>
+            <TextBlock Text="Mono / stereo WAV · up to 32 tracks&#10;Import audio to start a mix." Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
+          </StackPanel>
+          <ListBox ItemsSource="{Binding Tracks}" SelectedItem="{Binding Selected}" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" IsEnabled="{Binding CanEdit}">
+            <ListBox.ItemContainerStyle>
+              <Style TargetType="ListBoxItem">
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="9,12"/><Setter Property="Margin" Value="0,0,0,4"/>
+              </Style>
+            </ListBox.ItemContainerStyle>
+            <ListBox.ItemTemplate><DataTemplate>
+              <StackPanel>
+                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" Foreground="#DDB879"/>
+                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="#8C99AA" Margin="0,5,0,0"/>
+                <TextBlock Foreground="#8C99AA" FontSize="11" Margin="0,4,0,0">
+                  <Run Text="{Binding GainDb, StringFormat='{}{0:F1} dB'}"/><Run Text="   /   "/><Run Text="{Binding Azimuth, StringFormat='{}{0:F0}°'}"/>
+                </TextBlock>
+              </StackPanel>
+            </DataTemplate></ListBox.ItemTemplate>
+          </ListBox>
+        </DockPanel>
+      </Border>
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions><RowDefinition Height="155"/><RowDefinition Height="16"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Border Style="{StaticResource Card}">
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <TextBlock Text="SOURCE WAVEFORM" Style="{StaticResource Label}"/>
+            <local:WaveformView Grid.Row="1" Audio="{Binding Selected.Audio}" Margin="0,4" AutomationProperties.Name="Selected source waveform"/>
+            <TextBlock Grid.Row="2" Text="{Binding Selected.MediaPath, FallbackValue='No media selected', TargetNullValue='No media selected'}" FontSize="11" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
+          </Grid>
+        </Border>
+        <Grid Grid.Row="2">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/><ColumnDefinition Width="280"/></Grid.ColumnDefinitions>
+          <Border Style="{StaticResource Card}">
+            <DockPanel>
+              <StackPanel DockPanel.Dock="Top">
+                <TextBlock Text="SPATIAL POSITION" Style="{StaticResource Label}"/>
+                <TextBlock Text="Place your sound." FontSize="21" Margin="0,0,0,8"/>
+              </StackPanel>
+              <StackPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
+                <TextBlock Text="{Binding OutputLabels}" Foreground="{StaticResource Accent}" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
+                <TextBlock Text="Drag the source around the listening position.&#10;Stereo sources rotate as a ±30° pair." Foreground="{StaticResource Muted}" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"/>
+              </StackPanel>
+              <local:PannerView Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" IsEnabled="{Binding CanEditSelected}" MinHeight="180" AutomationProperties.Name="Surround source position"/>
+            </DockPanel>
+          </Border>
+          <Border Grid.Column="2" Style="{StaticResource Card}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+              <StackPanel IsEnabled="{Binding CanEditSelected}">
+                <TextBlock Text="CHANNEL STRIP" Style="{StaticResource Label}"/>
+                <TextBox Text="{Binding Selected.Name, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="Track name" MaxLength="200" Margin="0,0,0,12"/>
+                <StackPanel Orientation="Horizontal">
+                  <CheckBox Content="Mute" IsChecked="{Binding Selected.Mute}"/>
+                  <CheckBox Content="Solo" IsChecked="{Binding Selected.Solo}"/>
+                </StackPanel>
+                <TextBlock Text="{Binding Selected.GainDb, StringFormat='GAIN / {0:F1} dB'}" Margin="0,12,0,0"/>
+                <Slider Value="{Binding Selected.GainDb}" Minimum="-60" Maximum="12" TickFrequency=".5" AutomationProperties.Name="Track gain"/>
+                <TextBlock Text="{Binding Selected.Azimuth, StringFormat='AZIMUTH / {0:F0}°'}"/>
+                <Slider Value="{Binding Selected.Azimuth}" Minimum="-180" Maximum="180" TickFrequency="1" AutomationProperties.Name="Source azimuth"/>
+                <TextBlock Text="{Binding Selected.LfeDb, StringFormat='LFE SEND / {0:F1} dB'}"/>
+                <Slider Value="{Binding Selected.LfeDb}" Minimum="-60" Maximum="0" TickFrequency=".5" AutomationProperties.Name="LFE send" IsEnabled="{Binding HasLfe}"/>
+                <TextBlock Text="−60 dB = off · 120 Hz low-pass" Style="{StaticResource Label}"/>
+                <TextBlock Text="START OFFSET / SECONDS" Style="{StaticResource Label}"/>
+                <TextBox Text="{Binding Selected.StartSeconds, UpdateSourceTrigger=LostFocus, ValidatesOnExceptions=True}" AutomationProperties.Name="Track start offset"/>
+              </StackPanel>
+            </ScrollViewer>
+          </Border>
+        </Grid>
+      </Grid>
+    </Grid>
+    <Border Grid.Row="3" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Margin="0,18,0,0" Padding="0,16,0,0">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Top">
+          <Button Content="▶  Stereo preview" Click="Play_Click" IsEnabled="{Binding CanRender}"/>
+          <Button Content="■  Stop / cancel" Click="Stop_Click"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Margin="14,0">
+          <TextBlock Text="{Binding Status}" TextWrapping="Wrap" FontSize="12"/>
+          <TextBlock Text="{Binding RenderSummary}" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+        <Button Grid.Column="2" Content="Export PCM WAV →" Click="Export_Click" IsEnabled="{Binding CanRender}" VerticalAlignment="Top" Margin="0" Background="#3E3527" BorderBrush="{StaticResource Accent}"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
+

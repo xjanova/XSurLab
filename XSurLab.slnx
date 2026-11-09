@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/XSurLab.Core/XSurLab.Core.csproj" />
+    <Project Path="src/XSurLab.App/XSurLab.App.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/XSurLab.SmokeTests/XSurLab.SmokeTests.csproj" />
+  </Folder>
+</Solution>
