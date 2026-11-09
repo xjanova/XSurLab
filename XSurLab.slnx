@@ -1,9 +1,11 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/XSurLab.Core/XSurLab.Core.csproj" />
+    <Project Path="src/XSurLab.Audio/XSurLab.Audio.csproj" />
     <Project Path="src/XSurLab.App/XSurLab.App.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/XSurLab.SmokeTests/XSurLab.SmokeTests.csproj" />
+    <Project Path="tests/XSurLab.AudioChecks/XSurLab.AudioChecks.csproj" />
   </Folder>
 </Solution>
