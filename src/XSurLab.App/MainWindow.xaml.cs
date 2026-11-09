@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -15,7 +15,7 @@ namespace XSurLab.App;
 public partial class MainWindow : Window, INotifyPropertyChanged
 {
     public ObservableCollection<TrackViewModel> Tracks { get; } = [];
-    public LayoutOption[] Layouts { get; } = [new(SpeakerLayout.Stereo, "Stereo 2.0"), new(SpeakerLayout.Surround51, "5.1 Side"), new(SpeakerLayout.Surround51Back, "5.1 Back"), new(SpeakerLayout.Surround71, "7.1")];
+    public LayoutOption[] Layouts { get; } = [new(SpeakerLayout.Stereo, "Stereo 2.0"), new(SpeakerLayout.Surround51, "5.1 Side"), new(SpeakerLayout.Surround51Back, "5.1 Back"), new(SpeakerLayout.Surround71, "7.1"), new(SpeakerLayout.Surround514, "5.1.4"), new(SpeakerLayout.Surround714, "7.1.4")];
     public int[] Rates { get; } = [44100, 48000, 96000];
     public ObservableCollection<AudioDevice> OutputDevices { get; } = [];
     private string sessionName = "Untitled session", status = "Ready · import WAV to begin.", renderSummary = "Live WASAPI monitor · export remains independent of monitor level.";
@@ -39,7 +39,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string momentaryText = "M   —", shortTermText = "S   —", integratedText = "I   — LUFS", truePeakText = "TP  — dBTP";
 
     public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit(audio: false); } }
-    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(CanSendLfe)); Edit(restart: true); ResetMeters(); } }
+    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(HeightHint)); Changed(nameof(CanSendLfe)); Edit(restart: true); ResetMeters(); } }
     public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit(restart: true); } }
     public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit(); } }
     public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); } }
@@ -55,6 +55,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public double MonitorVolume { get => monitorVolume; set { monitorVolume = Math.Clamp(value, 0, 1); if (player is not null) player.Volume = monitorVolume; Changed(); } }
     public bool CanEditSelected => !busy && Selected is not null;
     public bool HasLfe => Layout != SpeakerLayout.Stereo;
+    public string HeightHint => SpatialMixer.HasHeights(Layout) ? "90° = overhead · drag toward the centre to lift" : "Heard on 5.1.4 and 7.1.4 only";
     public string OutputLabels => string.Join(" / ", SpatialMixer.Speakers(Layout).Select(s => s.Name));
     public string TrackSummary => $"{Tracks.Count} / 32 tracks · media stays linked";
     public FormatOption[] Formats { get; } = [new(SampleFormat.Pcm24, "PCM 24-bit"), new(SampleFormat.Pcm16, "PCM 16-bit"), new(SampleFormat.Float32, "Float 32-bit")];

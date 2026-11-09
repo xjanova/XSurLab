@@ -14,7 +14,12 @@ public static class SpatialMixer
 
     private static readonly Speaker L = new("L", -30, Bit: FrontLeft), R = new("R", 30, Bit: FrontRight), C = new("C", 0, Bit: FrontCenter),
         Lfe = new("LFE", 0, true, Bit: LowFrequency);
+    // Height speakers sit 45° up, at ±45° and ±135°: the usual 5.1.4 / 7.1.4 home placement.
+    private static readonly Speaker[] Heights = [new("Tfl", -45, Elevation: 45, Bit: TopFrontLeft), new("Tfr", 45, Elevation: 45, Bit: TopFrontRight),
+        new("Tbl", -135, Elevation: 45, Bit: TopBackLeft), new("Tbr", 135, Elevation: 45, Bit: TopBackRight)];
+    private const double HeightElevation = 45;
 
+    /// <summary>Speakers in WAVE channel order (ascending mask bit), which is also the order of rendered channels.</summary>
     public static Speaker[] Speakers(SpeakerLayout layout) => layout switch
     {
         SpeakerLayout.Stereo => [L, R],
@@ -22,8 +27,13 @@ public static class SpatialMixer
         SpeakerLayout.Surround51Back => [L, R, C, Lfe, new("Lb", -110, Bit: BackLeft), new("Rb", 110, Bit: BackRight)],
         SpeakerLayout.Surround71 => [L, R, C, Lfe, new("Lb", -150, Bit: BackLeft), new("Rb", 150, Bit: BackRight),
             new("Ls", -90, Bit: SideLeft), new("Rs", 90, Bit: SideRight)],
+        SpeakerLayout.Surround514 => [L, R, C, Lfe, new("Ls", -110, Bit: SideLeft), new("Rs", 110, Bit: SideRight), .. Heights],
+        SpeakerLayout.Surround714 => [L, R, C, Lfe, new("Lb", -150, Bit: BackLeft), new("Rb", 150, Bit: BackRight),
+            new("Ls", -90, Bit: SideLeft), new("Rs", 90, Bit: SideRight), .. Heights],
         _ => throw new ArgumentOutOfRangeException(nameof(layout))
     };
+
+    public static bool HasHeights(SpeakerLayout layout) => layout is SpeakerLayout.Surround514 or SpeakerLayout.Surround714;
 
     public static uint ChannelMask(SpeakerLayout layout) => Speakers(layout).Aggregate(0u, (mask, s) => mask | s.Bit);
 
@@ -75,10 +85,14 @@ public static class SpatialMixer
                     break;
                 case TopFrontLeft: Add(FrontLeft, gain * Half); break;
                 case TopFrontRight: Add(FrontRight, gain * Half); break;
-                case TopFrontCenter: Add(FrontCenter, gain * Half); break;
+                case TopFrontCenter:
+                    if (Has(TopFrontLeft)) { Add(TopFrontLeft, gain * Half); Add(TopFrontRight, gain * Half); } else Add(FrontCenter, gain * Half);
+                    break;
                 case TopBackLeft: Add(BackLeft, gain * Half); break;
                 case TopBackRight: Add(BackRight, gain * Half); break;
-                case TopBackCenter: Add(BackCenter, gain * Half); break;
+                case TopBackCenter:
+                    if (Has(TopBackLeft)) { Add(TopBackLeft, gain * Half); Add(TopBackRight, gain * Half); } else Add(BackCenter, gain * Half);
+                    break;
                 case TopCenter: foreach (var top in new[] { TopFrontLeft, TopFrontRight, TopBackLeft, TopBackRight }) Add(top, gain * .5); break;
                 default: throw new ArgumentOutOfRangeException(nameof(bit), $"Unknown channel bit 0x{bit:X}.");
             }
@@ -87,21 +101,48 @@ public static class SpatialMixer
         return gains;
     }
 
-    public static double[] Pan(SpeakerLayout layout, double azimuth)
+    /// <summary>
+    /// Power-preserving gains for a point source. Azimuth pans pairwise (sine/cosine) around the ear-level ring. On layouts
+    /// with height speakers, elevation crossfades power to the height ring by 45° and spreads it evenly over all heights by 90°;
+    /// elsewhere elevation is ignored and the source stays at ear level. Spread is the width in degrees of an arc of equally
+    /// weighted virtual sources centred on the azimuth; their powers are averaged, so the total power stays 1.
+    /// </summary>
+    public static double[] Pan(SpeakerLayout layout, double azimuth, double elevation = 0, double spread = 0)
     {
         var speakers = Speakers(layout);
-        var gains = new double[speakers.Length];
+        var power = new double[speakers.Length];
+        double lift = HasHeights(layout) ? Math.Clamp(elevation, 0, 90) : 0;
+        double upper = lift >= HeightElevation ? 1 : Math.Pow(Math.Sin(lift / HeightElevation * Math.PI / 2), 2);
+        double overhead = Math.Max(0, (lift - HeightElevation) / (90 - HeightElevation));
+        double width = Math.Clamp(spread, 0, 360);
+        int points = width == 0 ? 1 : (int)Math.Ceiling(width / 5) + 1;
+        for (int i = 0; i < points; i++)
+        {
+            double angle = points == 1 ? azimuth : azimuth - width / 2 + (i + .5) * width / points;
+            if (upper < 1) Ring(layout, speakers, heights: false, angle, power, (1 - upper) / points);
+            if (upper > 0 && overhead < 1) Ring(layout, speakers, heights: true, angle, power, upper * (1 - overhead) / points);
+        }
+        if (overhead > 0)
+        {
+            int tops = speakers.Count(s => s.Elevation > 0);
+            for (int i = 0; i < speakers.Length; i++) if (speakers[i].Elevation > 0) power[i] += overhead / tops;
+        }
+        return power.Select(Math.Sqrt).ToArray();
+    }
+
+    // Adds weight × gain² of a pairwise pan on one ring (ear level or heights) to power.
+    private static void Ring(SpeakerLayout layout, Speaker[] speakers, bool heights, double azimuth, double[] power, double weight)
+    {
         if (layout == SpeakerLayout.Stereo)
         {
-            var position = Math.Clamp(azimuth / 30, -1, 1);
-            var angle = (position + 1) * Math.PI / 4;
-            gains[0] = Math.Cos(angle);
-            gains[1] = Math.Sin(angle);
-            return gains;
+            var angle = (Math.Clamp(Math.IEEERemainder(azimuth, 360) / 30, -1, 1) + 1) * Math.PI / 4;
+            power[0] += weight * Math.Cos(angle) * Math.Cos(angle);
+            power[1] += weight * Math.Sin(angle) * Math.Sin(angle);
+            return;
         }
         double Normalize(double degrees) => (degrees % 360 + 360) % 360;
-        var ring = speakers.Select((s, i) => (Angle: Normalize(s.Azimuth), Index: i, s.IsLfe))
-            .Where(s => !s.IsLfe).OrderBy(s => s.Angle).ToArray();
+        var ring = speakers.Select((s, i) => (Angle: Normalize(s.Azimuth), Index: i, Speaker: s))
+            .Where(s => !s.Speaker.IsLfe && s.Speaker.Elevation > 0 == heights).OrderBy(s => s.Angle).ToArray();
         var target = Normalize(azimuth);
         for (int i = 0; i < ring.Length; i++)
         {
@@ -111,11 +152,10 @@ public static class SpatialMixer
             var value = target < a.Angle ? target + 360 : target;
             if (value < a.Angle || value > end) continue;
             var phase = (value - a.Angle) / (end - a.Angle) * Math.PI / 2;
-            gains[a.Index] = Math.Cos(phase);
-            gains[b.Index] = Math.Sin(phase);
-            break;
+            power[a.Index] += weight * Math.Cos(phase) * Math.Cos(phase);
+            power[b.Index] += weight * Math.Sin(phase) * Math.Sin(phase);
+            return;
         }
-        return gains;
     }
 
     public static void FoldStereo(ReadOnlySpan<double> source, SpeakerLayout layout, Span<double> output)
@@ -125,6 +165,7 @@ public static class SpatialMixer
         if (layout == SpeakerLayout.Stereo) return;
         output[0] += source[2] * Half;
         output[1] += source[2] * Half;
+        // Every layout lists surrounds and heights as left/right pairs from index 4, so parity picks the side.
         for (int i = 4; i < source.Length; i++) output[i % 2] += source[i] * Half;
     }
 }

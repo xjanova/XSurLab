@@ -1,9 +1,9 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace XSurLab.Core;
 
-public enum SpeakerLayout { Stereo, Surround51, Surround71, Surround51Back }
+public enum SpeakerLayout { Stereo, Surround51, Surround71, Surround51Back, Surround514, Surround714 }
 
 public sealed record TrackSettings
 {
@@ -12,6 +12,10 @@ public sealed record TrackSettings
     public string MediaPath { get; init; } = "";
     public double GainDb { get; init; }
     public double Azimuth { get; init; }
+    /// <summary>Degrees above ear level, 0–90. Heard only on layouts with height speakers.</summary>
+    public double Elevation { get; init; }
+    /// <summary>Width in degrees of the arc the source is spread over, 0–360.</summary>
+    public double Spread { get; init; }
     public double LfeDb { get; init; } = -60;
     public double StartSeconds { get; init; }
     public bool Mute { get; init; }
@@ -20,7 +24,7 @@ public sealed record TrackSettings
 
 public sealed record SessionDocument
 {
-    public int Version { get; init; } = 1;
+    public int Version { get; init; } = SessionStore.CurrentVersion;
     public string Name { get; init; } = "Untitled session";
     public int SampleRate { get; init; } = 48000;
     public SpeakerLayout Layout { get; init; } = SpeakerLayout.Surround51;
@@ -36,9 +40,13 @@ public static class SessionStore
         Converters = { new JsonStringEnumConverter<SpeakerLayout>(allowIntegerValues: false) }
     };
 
+    /// <summary>2 adds elevation, spread and the 5.1.4 / 7.1.4 layouts. Version 1 files load with both at 0.</summary>
+    public const int CurrentVersion = 2;
+
     public static void Validate(SessionDocument session)
     {
-        if (session.Version != 1) throw new InvalidDataException("Unsupported session version.");
+        if (session.Version is < 1 or > CurrentVersion)
+            throw new InvalidDataException($"Unsupported session version {session.Version}. This build reads versions 1–{CurrentVersion}.");
         if (string.IsNullOrWhiteSpace(session.Name) || session.Name.Length > 200)
             throw new InvalidDataException("Session name must contain 1–200 characters.");
         if (session.SampleRate is not (44100 or 48000 or 96000))
@@ -56,6 +64,8 @@ public static class SessionStore
                 throw new InvalidDataException("Each track needs a name and a media path.");
             Range(track.GainDb, -60, 12, "Track gain");
             Range(track.Azimuth, -180, 180, "Azimuth");
+            Range(track.Elevation, 0, 90, "Elevation");
+            Range(track.Spread, 0, 360, "Spread");
             Range(track.LfeDb, -60, 0, "LFE send");
             Range(track.StartSeconds, 0, 3600, "Start offset");
         }
@@ -74,7 +84,7 @@ public static class SessionStore
             ?? throw new InvalidDataException("Empty session file.");
         Validate(session);
         var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
-        return session with { Tracks = session.Tracks.Select(t => t with
+        return session with { Version = CurrentVersion, Tracks = session.Tracks.Select(t => t with
         {
             MediaPath = Path.GetFullPath(t.MediaPath, folder)
         }).ToList() };
@@ -87,7 +97,7 @@ public static class SessionStore
         if (session.Tracks.Any(t => string.Equals(Path.GetFullPath(t.MediaPath), path, StringComparison.OrdinalIgnoreCase)))
             throw new IOException("A session file cannot overwrite source audio.");
         var folder = Path.GetDirectoryName(path)!;
-        var portable = session with { Tracks = session.Tracks.Select(t => t with
+        var portable = session with { Version = CurrentVersion, Tracks = session.Tracks.Select(t => t with
         {
             MediaPath = Path.GetRelativePath(folder, Path.GetFullPath(t.MediaPath))
         }).ToList() };

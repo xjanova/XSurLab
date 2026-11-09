@@ -68,10 +68,103 @@ try
             for (int c = 0; c < a.Length; c++) Near(a[c], b[c]);
         }
     });
+    Test("Height layouts pan in two layers; elevation and spread keep power", () =>
+    {
+        foreach (var layout in Enum.GetValues<SpeakerLayout>())
+        {
+            int lfe = Array.FindIndex(SpatialMixer.Speakers(layout), s => s.IsLfe);
+            for (int angle = -180; angle <= 180; angle += 7)
+                foreach (var elevation in new[] { 0, 10, 30, 45, 60, 90 })
+                    foreach (var spread in new[] { 0, 30, 90, 200, 360 })
+                    {
+                        var pan = SpatialMixer.Pan(layout, angle, elevation, spread);
+                        Near(pan.Sum(g => g * g), 1, 1e-9);
+                        if (lfe >= 0) Equal(pan[lfe], 0d);
+                    }
+        }
+        Equal(SpatialMixer.ChannelMask(SpeakerLayout.Surround514), 0x2d60fu); Equal(SpatialMixer.ChannelMask(SpeakerLayout.Surround714), 0x2d63fu);
+        var speakers = SpatialMixer.Speakers(SpeakerLayout.Surround514);
+        int Index(string name) => Array.FindIndex(speakers, s => s.Name == name);
+        Near(SpatialMixer.Pan(SpeakerLayout.Surround514, 45, 45)[Index("Tfr")], 1);
+        var overhead = SpatialMixer.Pan(SpeakerLayout.Surround514, 17, 90);
+        foreach (var name in new[] { "Tfl", "Tfr", "Tbl", "Tbr" }) Near(overhead[Index(name)], .5);
+        var low = SpatialMixer.Pan(SpeakerLayout.Surround514, 0, 20);
+        double lifted = speakers.Select((s, i) => s.Elevation > 0 ? low[i] * low[i] : 0).Sum();
+        Near(lifted, Math.Pow(Math.Sin(20 / 45d * Math.PI / 2), 2), 1e-9);
+        Near(low[Index("Tfl")], low[Index("Tfr")]); Near(low[Index("C")] * low[Index("C")], 1 - lifted, 1e-9);
+        var flat = SpatialMixer.Pan(SpeakerLayout.Surround51, 30, 60); var same = SpatialMixer.Pan(SpeakerLayout.Surround51, 30);
+        for (int c = 0; c < flat.Length; c++) Near(flat[c], same[c]);
+        var wide = SpatialMixer.Pan(SpeakerLayout.Surround51, 0, 0, 120);
+        Near(wide[0], wide[1]); Near(wide[4], wide[5]);
+        // Half of a ±60° arc lies outside ±30°, so L/R carry more than C and a little leaks to the surrounds.
+        Check(wide[2] is > .3 and < 1 && wide[0] > wide[2] && wide[0] > wide[4] && wide[4] > 0, "A 120° spread centred ahead covers L/C/R");
+        var all = SpatialMixer.Pan(SpeakerLayout.Surround71, 0, 0, 360); var turned = SpatialMixer.Pan(SpeakerLayout.Surround71, 2.5, 0, 360);
+        double drift = all.Zip(turned, (a, b) => Math.Abs(a - b)).Max();
+        Console.WriteLine($"  360° spread drift under a 2.5° turn {drift:F4}");
+        Check(drift < .02, "A full spread must not depend on the azimuth");
+        foreach (var s in SpatialMixer.Speakers(SpeakerLayout.Surround714))
+            Equal(LoudnessMeter.Weight(s), s.IsLfe ? 0 : s.Elevation == 0 && Math.Abs(s.Azimuth) == 90 ? 1.41 : 1);
+    });
+    Test("7.1.4 renders heights in WAVE order, folds them to stereo and accepts 5.1.4 beds", () =>
+    {
+        var tone = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 48).ToArray());
+        var up = Track("up.wav") with { Azimuth = 45, Elevation = 45 };
+        var path = Path.Combine(root, "714.wav");
+        var result = WaveRenderer.Render(path, Session(SpeakerLayout.Surround714, up), [new(up, tone)]);
+        var bytes = File.ReadAllBytes(path);
+        Equal(result.Channels, 12); Equal(BitConverter.ToUInt32(bytes, Chunks(bytes)["fmt "].Offset + 20), 0x2d63fu);
+        for (int c = 0; c < 12; c++) Near(Sample24(bytes, 10, c, 12), c == 9 ? .25 : 0);
+        var folded = Path.Combine(root, "714-fold.wav");
+        WaveRenderer.Render(folded, Session(SpeakerLayout.Surround714, up), [new(up, tone)], new() { StereoFoldDown = true });
+        var fold = File.ReadAllBytes(folded);
+        Near(Sample24(fold, 10, 0, 2), 0); Near(Sample24(fold, 10, 1, 2), .25 * Math.Sqrt(.5));
+        var bed = new AudioBuffer(48000, 10, Enumerable.Range(0, 48 * 10).Select(i => (float)((i % 10 + 1) / 40d)).ToArray(), 0x2d60f);
+        var bedTrack = Track("bed514.wav");
+        double[] Out(SpeakerLayout layout)
+        {
+            var file = Path.Combine(root, $"bed514-{layout}.wav");
+            var r = WaveRenderer.Render(file, Session(layout, bedTrack), [new(bedTrack, bed)]);
+            var b = File.ReadAllBytes(file);
+            return Enumerable.Range(0, r.Channels).Select(c => Sample24(b, 10, c, r.Channels)).ToArray();
+        }
+        double h = Math.Sqrt(.5);
+        // Bed channels: L .025 R .05 C .075 LFE .1 Ls .125 Rs .15 Tfl .175 Tfr .2 Tbl .225 Tbr .25
+        foreach (var (layout, expected) in new (SpeakerLayout, double[])[]
+        {
+            (SpeakerLayout.Surround514, Enumerable.Range(1, 10).Select(i => i / 40d).ToArray()),
+            (SpeakerLayout.Surround714, [.025, .05, .075, .1, 0, 0, .125, .15, .175, .2, .225, .25]),
+            (SpeakerLayout.Surround51, [.025 + .175 * h, .05 + .2 * h, .075, .1, .125 + .225 * h, .15 + .25 * h]),
+        })
+        {
+            var actual = Out(layout);
+            Equal(actual.Length, expected.Length);
+            for (int c = 0; c < expected.Length; c++) Near(actual[c], expected[c]);
+        }
+    });
+    Test("Session v2 stores elevation, spread and height layouts; v1 files still load", () =>
+    {
+        var v1 = Path.Combine(root, "v1.xsurlab.json");
+        File.WriteAllText(v1, """
+            { "Version": 1, "Name": "Old", "SampleRate": 48000, "Layout": "Surround51", "MasterGainDb": -6,
+              "Tracks": [ { "Id": "4f9c2f8e-1d1b-4a39-9a51-0c3c9f6b2a11", "Name": "Old track", "MediaPath": "old.wav",
+                "GainDb": 0, "Azimuth": 30, "LfeDb": -60, "StartSeconds": 0, "Mute": false, "Solo": false } ] }
+            """);
+        var old = SessionStore.Load(v1);
+        Equal(old.Version, SessionStore.CurrentVersion); Equal(old.Tracks[0].Elevation, 0d); Equal(old.Tracks[0].Spread, 0d);
+        Equal(old.Tracks[0].MediaPath, Path.Combine(root, "old.wav"));
+        var raised = Session(SpeakerLayout.Surround714, Track("lifted.wav") with { Elevation = 30, Spread = 90 });
+        var saved = Path.Combine(root, "v2.xsurlab.json"); SessionStore.Save(saved, raised);
+        var json = File.ReadAllText(saved);
+        Check(json.Contains("\"Version\": 2") && json.Contains("\"Surround714\"") && json.Contains("\"Spread\": 90"), "v2 is written with the new fields");
+        Equal(SessionStore.Load(saved).Tracks.Single(), raised.Tracks.Single());
+        Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Tracks = [raised.Tracks[0] with { Elevation = 91 }] }));
+        Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Tracks = [raised.Tracks[0] with { Spread = -1 }] }));
+        Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Version = 3 }));
+    });
     Test("5.1 / 7.1 exports carry the mask, byte count and center channel in order", () =>
     {
         var media = WaveReader.Read(Fixture("center.wav", 1, 16, 1, 48, (_, _) => .25));
-        foreach (var (layout, channels, mask) in new[] { (SpeakerLayout.Surround51, 6, 0x60fu), (SpeakerLayout.Surround51Back, 6, 0x3fu), (SpeakerLayout.Surround71, 8, 0x63fu) })
+        foreach (var (layout, channels, mask) in new[] { (SpeakerLayout.Surround51, 6, 0x60fu), (SpeakerLayout.Surround51Back, 6, 0x3fu), (SpeakerLayout.Surround71, 8, 0x63fu), (SpeakerLayout.Surround514, 10, 0x2d60fu), (SpeakerLayout.Surround714, 12, 0x2d63fu) })
         {
             var track = Track("center.wav");
             var path = Path.Combine(root, $"{channels}ch.wav");

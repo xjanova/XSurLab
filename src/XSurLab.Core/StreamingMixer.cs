@@ -69,8 +69,8 @@ public sealed class StreamingMixer
             var state = states[i];
             double gain = !t.Mute && (!solo || t.Solo) ? Gain(t.GainDb) : 0;
             double[][] routes = state.Bed ?? (state.SourceChannels == 1
-                ? [SpatialMixer.Pan(Layout, t.Azimuth)]
-                : [SpatialMixer.Pan(Layout, t.Azimuth - 30), SpatialMixer.Pan(Layout, t.Azimuth + 30)]);
+                ? [SpatialMixer.Pan(Layout, t.Azimuth, t.Elevation, t.Spread)]
+                : [SpatialMixer.Pan(Layout, t.Azimuth - 30, t.Elevation, t.Spread), SpatialMixer.Pan(Layout, t.Azimuth + 30, t.Elevation, t.Spread)]);
             routes = routes.Select(route => route.Select(g => g * gain).ToArray()).ToArray();
             double lfe = lfeChannel < 0 || state.Bed is not null ? 0 : gain * Gain(t.LfeDb);
             return new TrackParameters(routes, lfe, gain > 0);
