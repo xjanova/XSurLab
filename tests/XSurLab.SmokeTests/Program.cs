@@ -76,13 +76,12 @@ try
             var track = Track("center.wav");
             var path = Path.Combine(root, $"{channels}ch.wav");
             var result = WaveRenderer.Render(path, Session(layout, track), [new(track, media)]);
-            var bytes = File.ReadAllBytes(path);
-            Equal(BitConverter.ToUInt16(bytes, 20), (ushort)0xfffe);
-            Equal(BitConverter.ToUInt16(bytes, 22), (ushort)channels);
-            Equal(BitConverter.ToUInt16(bytes, 34), (ushort)24);
-            Equal(BitConverter.ToUInt32(bytes, 40), mask);
-            Equal(BitConverter.ToUInt32(bytes, 64), (uint)(48 * channels * 3));
-            Equal(bytes.Length, 68 + 48 * channels * 3);
+            var bytes = File.ReadAllBytes(path); var chunks = Chunks(bytes); int fmt = chunks["fmt "].Offset;
+            Equal(BitConverter.ToUInt16(bytes, fmt), (ushort)0xfffe);
+            Equal(BitConverter.ToUInt16(bytes, fmt + 2), (ushort)channels);
+            Equal(BitConverter.ToUInt16(bytes, fmt + 14), (ushort)24);
+            Equal(BitConverter.ToUInt32(bytes, fmt + 20), mask);
+            Equal(chunks["data"].Size, 48 * channels * 3);
             Equal(result.Frames, 48L);
             for (int c = 0; c < channels; c++) Near(Sample24(bytes, 0, c, channels), c == 2 ? .25 : 0);
         }
@@ -137,7 +136,7 @@ try
         var media = new AudioBuffer(24000, 1, Enumerable.Repeat(.25f, 240).ToArray());
         var track = Track("rate.wav");
         var path = Path.Combine(root, "rate-output.wav");
-        var result = WaveRenderer.Render(path, Session(SpeakerLayout.Surround51, track), [new(track, media)], true);
+        var result = WaveRenderer.Render(path, Session(SpeakerLayout.Surround51, track), [new(track, media)], new() { StereoFoldDown = true, Format = SampleFormat.Pcm16, Dither = false });
         Equal(result.Frames, 480L);
         var audio = WaveReader.Read(path);
         Equal(audio.SampleRate, 48000); Equal(audio.Channels, 2); Near(audio.Duration, .01);
@@ -230,9 +229,9 @@ try
             Check(whole.SequenceEqual(chunks), "Chunk boundaries must preserve all samples exactly");
             Near(a.Peak, b.Peak);
             var path = Path.Combine(root, $"stream-{layout}-{stereo}.wav");
-            WaveRenderer.Render(path, session, [new(track, audio)], stereo);
+            WaveRenderer.Render(path, session, [new(track, audio)], new() { StereoFoldDown = stereo, Format = stereo ? SampleFormat.Pcm16 : SampleFormat.Pcm24, Dither = false });
             var bytes = File.ReadAllBytes(path);
-            int header = !stereo && layout != SpeakerLayout.Stereo ? 68 : 44;
+            int header = DataOffset(bytes);
             for (int i = 0; i < whole.Length; i++)
             {
                 double pcm = stereo ? BitConverter.ToInt16(bytes, header + i * 2) / 32768d
@@ -414,6 +413,72 @@ try
         Equal(result.Loudness.Integrated, mixer.Meter.Report().Integrated);
         Check(double.IsFinite(result.Loudness.Integrated) && mixer.Meter.Latest is { Frames: 48000 }, "Render and mixer must report the same measurement");
     });
+    Test("PCM16, PCM24 and float32 exports have valid RIFF structure and read back", () =>
+    {
+        var media = new AudioBuffer(48000, 1, Enumerable.Range(0, 4800).Select(i => (float)(.4 * Math.Sin(i * .05))).ToArray());
+        var track = Track("formats.wav");
+        foreach (var layout in new[] { SpeakerLayout.Stereo, SpeakerLayout.Surround51 })
+        foreach (var format in Enum.GetValues<SampleFormat>())
+        {
+            var path = Path.Combine(root, $"format-{layout}-{format}.wav");
+            WaveRenderer.Render(path, Session(layout, track), [new(track, media)], new() { Format = format });
+            var bytes = File.ReadAllBytes(path); var chunks = Chunks(bytes);
+            int fmt = chunks["fmt "].Offset, channels = layout == SpeakerLayout.Stereo ? 2 : 6;
+            int bits = format switch { SampleFormat.Pcm16 => 16, SampleFormat.Pcm24 => 24, _ => 32 };
+            Equal((int)BitConverter.ToUInt16(bytes, fmt + 14), bits);
+            Equal((int)BitConverter.ToUInt16(bytes, fmt + 12), channels * bits / 8);
+            Equal(chunks["data"].Size, 4800 * channels * bits / 8);
+            Check(chunks.ContainsKey("fact") == (format == SampleFormat.Float32), "Only float output carries a fact chunk");
+            if (format == SampleFormat.Float32) Equal(BitConverter.ToUInt32(bytes, chunks["fact"].Offset), 4800u);
+            Check(chunks.ContainsKey("bext"), "Broadcast WAV is on by default");
+            if (channels != 2) continue;
+            var back = WaveReader.Read(path);
+            double tolerance = format switch { SampleFormat.Pcm16 => 2d / 32768, SampleFormat.Pcm24 => 2d / 8388608, _ => 1e-7 };
+            for (int f = 0; f < 4800; f += 37) Near(back[f, 0], media[f, 0] * Math.Sqrt(.5), tolerance);
+        }
+    });
+    Test("TPDF dither is seeded, bounded to ±1 LSB and absent without the option", () =>
+    {
+        var media = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 2000).ToArray());
+        var track = Track("dither.wav"); var session = Session(SpeakerLayout.Stereo, track);
+        short[] Pcm16(string name, bool dither)
+        {
+            var path = Path.Combine(root, name);
+            WaveRenderer.Render(path, session, [new(track, media)], new() { Format = SampleFormat.Pcm16, Dither = dither, BroadcastWave = false });
+            var bytes = File.ReadAllBytes(path); int data = DataOffset(bytes);
+            return Enumerable.Range(0, 4000).Select(i => BitConverter.ToInt16(bytes, data + i * 2)).ToArray();
+        }
+        var plain = Pcm16("plain16.wav", false); var a = Pcm16("dither-a.wav", true); var b = Pcm16("dither-b.wav", true);
+        double exact = .25 * Math.Sqrt(.5) * 32768; int code = (int)Math.Round(exact);
+        Check(plain.All(s => s == code), "Without dither every sample rounds to the same code");
+        Check(a.All(s => Math.Abs(s - code) <= 1) && a.Distinct().Count() == 3, "TPDF dither spans ±1 LSB");
+        Check(a.SequenceEqual(b), "The same seed must reproduce the same dither");
+        Near(a.Average(s => (double)s), exact, .05);
+    });
+    Test("Broadcast WAV bext stores the description, version 2 and the measured loudness", () =>
+    {
+        var media = new AudioBuffer(48000, 1, Enumerable.Range(0, 48000 * 3).Select(i => (float)(.3 * Math.Sin(2 * Math.PI * 1000 * i / 48000))).ToArray());
+        var track = Track("bwf.wav"); var session = Session(SpeakerLayout.Surround51, track) with { Name = "Reel 1 · A" };
+        var path = Path.Combine(root, "bwf-out.wav");
+        var result = WaveRenderer.Render(path, session, [new(track, media)], new() { Created = new DateTime(2026, 11, 9, 21, 5, 7) });
+        var bytes = File.ReadAllBytes(path); var (offset, size) = Chunks(bytes)["bext"];
+        string Text(int at, int length) => Encoding.ASCII.GetString(bytes, offset + at, length).TrimEnd('\0');
+        short Loudness(int index) => BitConverter.ToInt16(bytes, offset + 412 + index * 2);
+        Equal(Text(0, 256), "Reel 1 ? A"); Equal(Text(256, 32), "XSurLab 0.3");
+        Equal(Text(320, 10), "2026-11-09"); Equal(Text(330, 8), "21:05:07");
+        Equal(BitConverter.ToUInt16(bytes, offset + 346), (ushort)2);
+        Console.WriteLine($"  center 1 kHz at -10.5 dBFS: {result.Loudness.Integrated:F2} LUFS, {result.Loudness.TruePeakDb:F2} dBTP");
+        Near(result.Loudness.Integrated, 20 * Math.Log10(.3) - 3.01, .1);
+        Equal(Loudness(0), (short)Math.Round(result.Loudness.Integrated * 100));
+        Equal(Loudness(1), (short)Math.Round(result.Loudness.Range * 100));
+        Equal(Loudness(2), (short)Math.Round(result.Loudness.TruePeakDb * 100));
+        Equal(Loudness(3), (short)Math.Round(result.Loudness.MaxMomentary * 100));
+        Equal(Loudness(4), (short)Math.Round(result.Loudness.MaxShortTerm * 100));
+        Check(Text(602, size - 602).StartsWith("A=PCM,F=48000,W=24,M=multichannel,T=XSurLab 0.3"), "Coding history must describe the PCM format");
+        var plain = Path.Combine(root, "plain-out.wav");
+        WaveRenderer.Render(plain, session, [new(track, media)], new() { BroadcastWave = false });
+        Check(!Chunks(File.ReadAllBytes(plain)).ContainsKey("bext"), "bext can be switched off");
+    });
 }
 finally { Directory.Delete(root, recursive: true); }
 Console.WriteLine($"{count - failures}/{count} checks passed.");
@@ -458,9 +523,25 @@ LoudnessReport Measure(int rate, SpeakerLayout layout, params (double Seconds, d
 }
 TrackSettings Track(string name) => new() { MediaPath = Path.Combine(root, name), Name = name };
 SessionDocument Session(SpeakerLayout layout, params TrackSettings[] tracks) => new() { Layout = layout, MasterGainDb = 0, Tracks = tracks.ToList() };
+Dictionary<string, (int Offset, int Size)> Chunks(byte[] bytes)
+{
+    Check(Encoding.ASCII.GetString(bytes, 0, 4) == "RIFF" && Encoding.ASCII.GetString(bytes, 8, 4) == "WAVE", "RIFF/WAVE header");
+    Check(BitConverter.ToUInt32(bytes, 4) == bytes.Length - 8, "RIFF size must match the file length");
+    var chunks = new Dictionary<string, (int, int)>();
+    int i = 12;
+    while (i + 8 <= bytes.Length)
+    {
+        string id = Encoding.ASCII.GetString(bytes, i, 4); int size = (int)BitConverter.ToUInt32(bytes, i + 4);
+        chunks.Add(id, (i + 8, size));
+        i += 8 + size + (size & 1);
+    }
+    Check(i == bytes.Length, "Chunks must fill the file exactly");
+    return chunks;
+}
+int DataOffset(byte[] bytes) => Chunks(bytes)["data"].Offset;
 double Sample24(byte[] bytes, int frame, int channel, int channels)
 {
-    int i = 68 + (frame * channels + channel) * 3;
+    int i = DataOffset(bytes) + (frame * channels + channel) * 3;
     int sample = bytes[i] | bytes[i + 1] << 8 | bytes[i + 2] << 16;
     return (sample << 8 >> 8) / 8388608d;
 }
