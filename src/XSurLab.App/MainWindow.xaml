@@ -166,7 +166,7 @@
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <Grid Grid.ColumnSpan="3" Margin="0,0,0,12" IsEnabled="{Binding CanEdit}">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
           <StackPanel Margin="0,0,12,0">
             <TextBlock Text="WASAPI OUTPUT" Style="{StaticResource Label}"/>
             <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedOutput}" AutomationProperties.Name="Monitor output device"
@@ -179,9 +179,17 @@
           </StackPanel>
           <Button Grid.Column="2" Content="Refresh outputs" Click="RefreshOutputs_Click" VerticalAlignment="Bottom"/>
           <CheckBox Grid.Column="3" Content="Stereo fold-down" IsChecked="{Binding StereoMonitor}" VerticalAlignment="Bottom" Margin="12,0,18,8" ToolTip="Clear to send the session's discrete channels. Shared needs the matching Windows speaker layout; Exclusive needs a driver that accepts it."/>
-          <StackPanel Grid.Column="4">
+          <StackPanel Grid.Column="4" Margin="0,0,14,0">
+            <TextBlock Text="{Binding CalibrationLabel}" Style="{StaticResource Label}"/>
+            <StackPanel Orientation="Horizontal">
+              <Button Content="Calibrate…" Click="Calibrate_Click" IsEnabled="{Binding CanCalibrate}" ToolTip="Test noise, trim, delay and bass management for this output and layout · monitor only, exports are unchanged"/>
+              <CheckBox Content="Apply" IsChecked="{Binding UseCalibration}" IsEnabled="{Binding HasCalibration}" VerticalAlignment="Center" Margin="0"
+                        ToolTip="{Binding CalibrationText}" ToolTipService.ShowOnDisabled="True" AutomationProperties.Name="Apply speaker calibration" AutomationProperties.HelpText="{Binding CalibrationText}"/>
+            </StackPanel>
+          </StackPanel>
+          <StackPanel Grid.Column="5">
             <TextBlock Text="{Binding MonitorVolume, StringFormat='MONITOR / {0:P0}'}" Style="{StaticResource Label}"/>
-            <Slider Value="{Binding MonitorVolume}" Minimum="0" Maximum="1" AutomationProperties.Name="Monitor volume"/>
+            <Slider Value="{Binding MonitorVolume}" Minimum="0" Maximum="1" TickFrequency=".01" SmallChange=".01" LargeChange=".1" AutomationProperties.Name="Monitor volume"/>
           </StackPanel>
         </Grid>
         <StackPanel Grid.Row="1" Orientation="Horizontal" VerticalAlignment="Top">

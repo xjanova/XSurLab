@@ -41,13 +41,13 @@ public sealed class WasapiPlayback : IDisposable
         }
     }
 
-    public WasapiPlayback(StreamingMixer mixer, string deviceId, double volume = .5, IProgress<PlaybackInfo>? started = null, OutputMode mode = OutputMode.Shared)
+    public WasapiPlayback(IAudioSource source, string deviceId, double volume = .5, IProgress<PlaybackInfo>? started = null, OutputMode mode = OutputMode.Shared)
     {
         Volume = volume;
         Mode = mode;
         Completion = OnAudioThread(() =>
         {
-            try { return Render(mixer, deviceId, started, cancellation.Token); }
+            try { return Render(source, deviceId, started, cancellation.Token); }
             finally { cancellation.Dispose(); }
         });
     }
@@ -98,7 +98,7 @@ public sealed class WasapiPlayback : IDisposable
                 + $"This endpoint reports {endpointChannels} channels / mask 0x{endpointMask:X}. Select another endpoint or enable Stereo fold-down.");
     }
 
-    private PlaybackInfo Render(StreamingMixer mixer, string id, IProgress<PlaybackInfo>? started, CancellationToken token)
+    private PlaybackInfo Render(IAudioSource mixer, string id, IProgress<PlaybackInfo>? started, CancellationToken token)
     {
         var enumerator = (IDeviceEnumerator)new DeviceEnumeratorObject();
         IDevice? device = null;
@@ -114,7 +114,7 @@ public sealed class WasapiPlayback : IDisposable
             Native.Check(enumerator.GetDevice(id, out device));
             string name = FriendlyName(device);
             client = Activate(device);
-            uint mask = mixer.StereoMonitor ? 3u : SpatialMixer.ChannelMask(mixer.Layout);
+            uint mask = mixer.ChannelMask;
             EndpointEncoding encoding;
             if (exclusive)
             {
@@ -218,7 +218,8 @@ public sealed class WasapiPlayback : IDisposable
                 for (int i = 0; i < count; i++)
                 {
                     double value = samples[i] * level;
-                    if (Math.Abs(value) > 1) throw new InvalidOperationException("Monitor overload. Lower track, master or monitor gain and play again.");
+                    if (Math.Abs(value) > 1) throw new InvalidOperationException("Monitor overload above 0 dBFS. Lower MONITOR, a positive speaker trim or LFE +10 dB, "
+                        + "or the track and master gain, and play again.");
                     samples[i] = value;
                 }
                 Sample.Encode(samples.AsSpan(0, count), bytes, encoding);
@@ -256,7 +257,7 @@ public sealed class WasapiPlayback : IDisposable
         }
     }
 
-    private static EndpointEncoding ExclusiveEncoding(IAudioClient client, string name, StreamingMixer mixer, uint mask)
+    private static EndpointEncoding ExclusiveEncoding(IAudioClient client, string name, IAudioSource mixer, uint mask)
     {
         foreach (var encoding in ExclusiveEncodings)
         {

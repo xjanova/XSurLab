@@ -1,8 +1,8 @@
 namespace XSurLab.Core;
 
-public sealed class StreamingMixer
+public sealed class StreamingMixer : IAudioSource
 {
-    private const double RampSeconds = .02;
+    public const double RampSeconds = .02;
     private readonly SessionDocument initial;
     private readonly TrackState[] states;
     private readonly double[] mix;
@@ -12,11 +12,14 @@ public sealed class StreamingMixer
     private double master, masterStep;
     private int rampLeft;
     private long position, seekRequest = -1;
+    private int seeks;
     private double fade = 1, fadeStep;
     public int SampleRate => initial.SampleRate;
     public SpeakerLayout Layout => initial.Layout;
     public bool StereoMonitor { get; }
     public int Channels { get; }
+    public uint ChannelMask => SpatialMixer.ChannelMask(StereoMonitor ? SpeakerLayout.Stereo : Layout);
+    public int Seeks => Volatile.Read(ref seeks);
     public long TotalFrames { get; }
     /// <summary>Next frame Read produces. Safe to read from any thread.</summary>
     public long Position => Volatile.Read(ref position);
@@ -101,7 +104,7 @@ public sealed class StreamingMixer
         if (destination.Length % Channels != 0) throw new ArgumentException("Buffer must contain whole audio frames.", nameof(destination));
         destination.Clear();
         long seek = Interlocked.Exchange(ref seekRequest, -1), frame = position;
-        if (seek >= 0) { frame = seek; fade = 0; fadeStep = 1d / RampFrames; }
+        if (seek >= 0) { frame = seek; fade = 0; fadeStep = 1d / RampFrames; Interlocked.Increment(ref seeks); }
         int frames = (int)Math.Min(destination.Length / Channels, TotalFrames - frame);
         var block = Volatile.Read(ref parameters);
         if (!ReferenceEquals(block, active)) Retarget(block);

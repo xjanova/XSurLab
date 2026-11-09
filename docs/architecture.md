@@ -2,18 +2,23 @@
 
 - **XSurLab.Core**: WAV/RF64 decoder and streaming reader, validated JSON sessions, speaker maps, two-layer panner,
   windowed-sinc resampler, track EQ, stateful streaming mixer, BS.1770-4 loudness meter, WAV/BWF/RF64 writer,
-  offline renderer, delivery with QC, and edit history.
+  offline renderer, delivery with QC, edit history, and the monitor-only speaker calibration (`MonitorChain`,
+  `TestSignal`, `CalibrationStore`).
 - **XSurLab.Audio**: native event-driven WASAPI output (shared and exclusive), endpoint enumeration and change notifications, strict discrete layout checks; no NuGet audio dependency.
 - **XSurLab.App**: native WPF UI: timeline, source panner, EQ graph, channel meters, deliver window, file dialogs and live monitor controls.
 - **XSurLab.SmokeTests**: deterministic signal/file/stream checks without an external test framework.
 - **XSurLab.AudioChecks**: routing contract, PCM packing, device-list and COM notification checks, plus optional
-  silent hardware playback (drain, seek and cancel in shared and exclusive mode).
+  silent hardware playback (drain, seek, cancel, and a calibrated drain with a silent test signal, in shared and
+  exclusive mode).
 
 ## Signal path
 
 `source PCM/float → windowed-sinc rate conversion (when rates differ) → 6-band track EQ → track gain × pan
 (two-layer, with spread) or bed routing by channel mask → sum → master gain → [Lo/Ro fold-down for the monitor]
 → meter → PCM16/24 with TPDF dither, or float32`
+
+The monitor adds `→ [bass management] → speaker trim → speaker delay → monitor gain → WASAPI` after the meter.
+Export and delivery read the mixer directly, so calibration can never reach a file.
 
 LFE is an explicit parallel send from the EQ'd mono source or stereo average through a 120 Hz
 second-order Butterworth low-pass; track gain and the send gain apply after the filter, before master
@@ -64,14 +69,48 @@ channel mask. `IsFormatSupported` must return S_OK for the session rate/float fo
 rejected. This avoids accepting a surround-to-stereo APO as discrete output. In exclusive mode the driver
 decides: it may accept a layout the Windows speaker setup does not show (for example 7.1 on an endpoint
 configured as 5.1), and the channels then go to the driver's outputs as WAVE order says. Stereo fold-down
-is explicit and may use any endpoint that accepts stereo. Physical speaker wiring and calibration require
-hardware checks. Output selection, output mode, fold-down and monitor gain are not saved.
+is explicit and may use any endpoint that accepts stereo. Physical speaker wiring still needs a listening check;
+the calibration test signal names each speaker as it plays. Output selection, output mode, fold-down and monitor
+gain are not saved.
 
 Monitor gain starts at 50%, is separate from master/export, and is applied just before sample conversion.
 A block above full scale after monitor gain stops playback before that block is submitted. Export still
 rejects clipping in the complete mix. Neither path is a limiter or a true-peak meter. The reported buffer
 (shared) or period (exclusive) is not round-trip latency or a low-latency guarantee; the playhead
 estimate is within one period in exclusive mode.
+
+## Speaker calibration
+
+`WasapiPlayback` plays any `IAudioSource`. The app wraps the mixer (or, in the calibration window, a `TestSignal`)
+in a `MonitorChain` built for the monitor layout: the session layout, or Stereo for the fold-down. A calibration
+belongs to one output (endpoint ID) and one layout and lives in `%APPDATA%\XSurLab\calibration.json`, never in a
+session. Loading validates the version, size (1 MiB), speaker names and order, trim −20…+10 dB, delay 0–50 ms and
+the crossover; saving writes a sibling temporary file and swaps it in with `File.Replace`, keeping the previous file
+as `.bak`. A file that cannot be read is left in place and the monitor plays flat; the first save after that copies
+it to `calibration.json.unreadable-<time>` before replacing it, so rotating `.bak` cannot lose it.
+
+Per frame the chain runs bass management, then trim, then a per-speaker delay line rounded to whole samples. Bass
+management is a fourth-order Linkwitz–Riley crossover (two Butterworth biquads per half): every main speaker is
+high-passed, the low-passed sum of the mains joins LFE on the subwoofer, optionally with the +10 dB in-band LFE gain,
+and high plus low add back to a flat magnitude (allpass). LFE is not low-passed again. The filters always run, so
+switching bass management on has no start-up transient; while it is off, every sample passes unchanged, and a flat
+calibration is bit-exact.
+
+The UI publishes a calibration as an immutable record; the audio thread ramps trims, the bass-management blend, the
+LFE gain and the crossover coefficients over 20 ms. A delay change crossfades from the old tap to the new one over
+20 ms; a change that arrives during a crossfade waits for it, so at most two taps are mixed and the output never
+jumps. A seek (counted by `IAudioSource.Seeks`) clears the delay lines and filter history, since the mixer fades in
+from silence there. When the source ends, the chain keeps reading silence through the delay lines until the most
+delayed speaker has played out, and only then reports `Finished`.
+
+`TestSignal` is xorshift64* white noise through Paul Kellet's pink filter and a 24 dB/oct band-pass (500 Hz–2 kHz
+for mains, 20–120 Hz for the subwoofer), scaled to −20 dBFS RMS by measuring ten seconds of its own deterministic
+output and clipped at −8 dBFS. One speaker plays at a time; a new speaker waits until the old one has faded out over
+20 ms. In the calibration window the chain bypasses bass management, so every speaker, the subwoofer included, is
+measured on its own noise. Mixes expect LFE 10 dB above the mains in band: with bass management and LFE +10 dB the
+chain adds that gain, so the subwoofer is trimmed to read the same as the mains; without bass management (or with
+LFE +10 dB off) nothing is added and the subwoofer is set to read 10 dB above them. The noise never ends; closing the
+window fades it out and releases the output before the main window may play again.
 
 WASAPI references: [Rendering a Stream](https://learn.microsoft.com/en-us/windows/win32/coreaudio/rendering-a-stream),
 [IsFormatSupported](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-isformatsupported).
@@ -125,9 +164,9 @@ The test harness generates its own fixtures and always deletes its own temporary
 
 ## Next milestones
 
-1. ASIO output, measured round-trip latency and per-speaker calibration (delay, trim, test signals).
+1. ASIO output, measured round-trip latency, and microphone-assisted calibration (level, distance, room EQ).
 2. Automation, clip trim/split/fades, bus routing and dynamics.
-3. Up/downmix workspace, bass management and binaural monitoring.
+3. Up/downmix workspace, per-speaker large/small bass management and binaural monitoring.
 4. Licensed encoder integrations (DTS family) after their APIs and terms are verified.
 
 The design prototype is a reference, not a claim that its eight workspaces have native implementations.
