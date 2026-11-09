@@ -30,7 +30,7 @@ public sealed class StreamingMixer
             throw new InvalidDataException("Loaded media does not match the session.");
         if (!tracks.Any(t => !t.Settings.Mute && (!tracks.Any(x => x.Settings.Solo) || t.Settings.Solo)))
             throw new InvalidOperationException("No audible tracks. Import audio or check mute/solo.");
-        if (tracks.Any(t => t.Audio.SampleRate <= 0 || t.Audio.Channels is not (1 or 2) || t.Audio.Frames == 0))
+        if (tracks.Any(t => t.Audio.SampleRate <= 0 || t.Audio.Frames == 0 || !SpatialMixer.IsValidMask(t.Audio.ChannelMask, t.Audio.Channels)))
             throw new InvalidDataException("Invalid decoded audio.");
         initial = session with { Tracks = session.Tracks.ToList() };
         StereoMonitor = stereoMonitor;
@@ -42,7 +42,7 @@ public sealed class StreamingMixer
             throw new InvalidDataException("Render duration must be between zero and one hour.");
         RampFrames = Math.Max(1, (int)Math.Round(SampleRate * RampSeconds));
         lfeChannel = Array.FindIndex(speakers, s => s.IsLfe);
-        states = tracks.Select(t => new TrackState(t, SampleRate, speakers.Length)).ToArray();
+        states = tracks.Select(t => new TrackState(t, SampleRate, Layout, speakers.Length)).ToArray();
         mix = new double[speakers.Length];
         Meter = new LoudnessMeter(SampleRate, stereoMonitor ? SpatialMixer.Speakers(SpeakerLayout.Stereo) : speakers);
         parameters = active = Prepare(session);
@@ -66,11 +66,14 @@ public sealed class StreamingMixer
         bool solo = session.Tracks.Any(t => t.Solo);
         var tracks = session.Tracks.Select((t, i) =>
         {
+            var state = states[i];
             double gain = !t.Mute && (!solo || t.Solo) ? Gain(t.GainDb) : 0;
-            var left = SpatialMixer.Pan(Layout, t.Azimuth - (states[i].IsStereo ? 30 : 0));
-            var right = SpatialMixer.Pan(Layout, t.Azimuth + (states[i].IsStereo ? 30 : 0));
-            for (int c = 0; c < left.Length; c++) { left[c] *= gain; right[c] *= gain; }
-            return new TrackParameters(left, right, lfeChannel < 0 ? 0 : gain * Gain(t.LfeDb), gain > 0);
+            double[][] routes = state.Bed ?? (state.SourceChannels == 1
+                ? [SpatialMixer.Pan(Layout, t.Azimuth)]
+                : [SpatialMixer.Pan(Layout, t.Azimuth - 30), SpatialMixer.Pan(Layout, t.Azimuth + 30)]);
+            routes = routes.Select(route => route.Select(g => g * gain).ToArray()).ToArray();
+            double lfe = lfeChannel < 0 || state.Bed is not null ? 0 : gain * Gain(t.LfeDb);
+            return new TrackParameters(routes, lfe, gain > 0);
         }).ToArray();
         return new Parameters(tracks, Gain(session.MasterGainDb));
     }
@@ -121,70 +124,74 @@ public sealed class StreamingMixer
     }
 
     private sealed record Parameters(TrackParameters[] Tracks, double Master);
-    // Left/Right hold pan × track gain per output channel; zero when muted or not soloed.
-    private sealed record TrackParameters(double[] Left, double[] Right, double Lfe, bool Audible);
+    // Routes[source channel][output channel] holds pan or bed routing × track gain; all zero when muted or not soloed.
+    private sealed record TrackParameters(double[][] Routes, double Lfe, bool Audible);
 
     private sealed class TrackState
     {
-        private readonly AudioBuffer audio;
+        private readonly AudioReader audio;
         private readonly Resampler? resampler;
         private readonly double[] source;
         private readonly long offset;
         private readonly LowPass filter;
-        private readonly double[] left, right, leftStep, rightStep;
+        private readonly double[][] current, steps;
         private TrackParameters target = null!;
         private double lfe, lfeStep;
         private bool silent;
-        public bool IsStereo => audio.Channels == 2;
-        public TrackState(LoadedTrack track, int rate, int channels)
+        public int SourceChannels => source.Length;
+        /// <summary>Fixed routing of each channel of multichannel media; null for panned mono and stereo sources.</summary>
+        public double[][]? Bed { get; }
+
+        public TrackState(LoadedTrack track, int rate, SpeakerLayout layout, int outputs)
         {
-            audio = track.Audio;
-            resampler = audio.SampleRate == rate ? null : new Resampler(audio.SampleRate, rate);
-            source = new double[audio.Channels];
+            var media = track.Audio;
+            audio = media.OpenReader();
+            resampler = media.SampleRate == rate ? null : new Resampler(media.SampleRate, rate);
+            source = new double[media.Channels];
             offset = (long)Math.Round(track.Settings.StartSeconds * rate);
             filter = new LowPass(rate);
-            left = new double[channels]; right = new double[channels];
-            leftStep = new double[channels]; rightStep = new double[channels];
+            if (media.Channels > 2) Bed = SpatialMixer.Bits(media.ChannelMask).Select(bit => SpatialMixer.Route(layout, bit)).ToArray();
+            current = Enumerable.Range(0, media.Channels).Select(_ => new double[outputs]).ToArray();
+            steps = Enumerable.Range(0, media.Channels).Select(_ => new double[outputs]).ToArray();
         }
         public void Reset(TrackParameters p)
         {
             target = p;
-            p.Left.CopyTo(left, 0); p.Right.CopyTo(right, 0);
+            for (int s = 0; s < current.Length; s++) p.Routes[s].CopyTo(current[s], 0);
             lfe = p.Lfe; silent = !p.Audible;
         }
         public void Retarget(TrackParameters p, int frames)
         {
             target = p;
-            for (int c = 0; c < left.Length; c++)
-            {
-                leftStep[c] = (p.Left[c] - left[c]) / frames;
-                rightStep[c] = (p.Right[c] - right[c]) / frames;
-            }
+            for (int s = 0; s < current.Length; s++)
+                for (int c = 0; c < current[s].Length; c++) steps[s][c] = (p.Routes[s][c] - current[s][c]) / frames;
             lfeStep = (p.Lfe - lfe) / frames;
             silent = false;
         }
         public void Step(bool last)
         {
             if (last) { Reset(target); return; }
-            for (int c = 0; c < left.Length; c++) { left[c] += leftStep[c]; right[c] += rightStep[c]; }
+            for (int s = 0; s < current.Length; s++)
+                for (int c = 0; c < current[s].Length; c++) current[s][c] += steps[s][c];
             lfe += lfeStep;
         }
         public void Add(long frame, double[] output, int lfeChannel)
         {
             long local = frame - offset;
             if (local < 0) return;
-            double a, b;
-            if (resampler is null) { a = audio.At(local, 0); b = IsStereo ? audio.At(local, 1) : 0; }
-            else
-            {
-                resampler.Read(audio, local * resampler.Ratio, source);
-                a = source[0]; b = IsStereo ? source[1] : 0;
-            }
+            if (resampler is null) for (int s = 0; s < source.Length; s++) source[s] = audio.At(local, s);
+            else resampler.Read(audio, local * resampler.Ratio, source);
             // The low-pass history runs even while muted so a live LFE or unmute has no filter start-up transient.
-            double bass = filter.Process(IsStereo ? (a + b) * .5 : a);
+            double bass = Bed is null ? filter.Process(source.Length == 2 ? (source[0] + source[1]) * .5 : source[0]) : 0;
             if (silent) return;
-            for (int c = 0; c < output.Length; c++) output[c] += a * left[c] + b * right[c];
-            if (lfeChannel >= 0) output[lfeChannel] += bass * lfe;
+            for (int s = 0; s < source.Length; s++)
+            {
+                double x = source[s];
+                if (x == 0) continue;
+                var route = current[s];
+                for (int c = 0; c < output.Length; c++) output[c] += x * route[c];
+            }
+            if (lfeChannel >= 0 && lfe != 0) output[lfeChannel] += bass * lfe;
         }
     }
 

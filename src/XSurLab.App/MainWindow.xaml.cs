@@ -39,10 +39,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string momentaryText = "M   —", shortTermText = "S   —", integratedText = "I   — LUFS", truePeakText = "TP  — dBTP";
 
     public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit(audio: false); } }
-    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Edit(restart: true); ResetMeters(); } }
+    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(CanSendLfe)); Edit(restart: true); ResetMeters(); } }
     public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit(restart: true); } }
     public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit(); } }
-    public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); } }
+    public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); } }
+    public bool CanPanSelected => CanEditSelected && Selected?.CanPan == true;
+    public bool CanSendLfe => CanPanSelected && HasLfe;
     public string Status { get => status; private set { status = value; Changed(); } }
     public string RenderSummary { get => renderSummary; private set { renderSummary = value; Changed(); } }
     public bool CanEdit => !busy;
@@ -113,6 +115,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         busy = value;
         Changed(nameof(CanEdit)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected)); Changed(nameof(CanDither));
+        Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe));
     }
     private void TrackChanged(object? sender, PropertyChangedEventArgs e) => Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName != nameof(TrackViewModel.Name));
     private void RefreshTracks()
@@ -145,7 +148,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private async void Import_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Filter = "WAV audio|*.wav", Multiselect = true, Title = "Import mono / stereo PCM WAV" };
+        var dialog = new OpenFileDialog { Filter = "WAV audio|*.wav", Multiselect = true, Title = "Import WAV · mono, stereo or multichannel bed" };
         if (dialog.ShowDialog(this) != true) return;
         await ImportAsync(dialog.FileNames);
     }
@@ -157,7 +160,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             if (Tracks.Count + files.Count > 32) throw new InvalidDataException("A session supports up to 32 tracks.");
             var token = operation.Token;
-            long used = Tracks.Sum(t => (long)t.Audio.Samples.Length * 4);
+            long used = Tracks.Sum(t => t.Audio.MemoryBytes);
             Status = "Reading audio…";
             var loaded = await Task.Run(() => LoadMedia(files.Select(p => new TrackSettings
             {
@@ -181,8 +184,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             try { audio = WaveReader.Read(item.MediaPath, cancellationToken); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             { throw new IOException($"Cannot import '{item.MediaPath}': {ex.Message}", ex); }
-            used += (long)audio.Samples.Length * 4;
-            if (used > 256L * 1024 * 1024) throw new InvalidDataException("Decoded session audio exceeds 256 MiB. Use shorter clips.");
+            // Files above WaveReader.MapThreshold are memory-mapped and do not count; this bounds the small decoded ones.
+            used += audio.MemoryBytes;
+            if (used > 1L << 30) throw new InvalidDataException("Decoded session audio exceeds 1 GiB.");
             loaded.Add(new(item, audio));
         }
         return loaded;
@@ -395,8 +399,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 }
 
-public sealed record LayoutOption(SpeakerLayout Layout, string Name);
-public sealed record FormatOption(SampleFormat Format, string Name);
+// ToString is what screen readers announce for combo-box items.
+public sealed record LayoutOption(SpeakerLayout Layout, string Name) { public override string ToString() => Name; }
+public sealed record FormatOption(SampleFormat Format, string Name) { public override string ToString() => Name; }
 
 
 

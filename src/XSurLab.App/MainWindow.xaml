@@ -52,7 +52,7 @@
           </StackPanel>
           <StackPanel DockPanel.Dock="Bottom" Margin="4,12,4,0">
             <Button Content="Remove selected track" Click="Remove_Click" IsEnabled="{Binding CanEditSelected}" Margin="0,0,0,12"/>
-            <TextBlock Text="Mono / stereo WAV · up to 32 tracks&#10;Space play/stop · Esc stop · Ctrl+E export" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
+            <TextBlock Text="Mono, stereo or multichannel WAV · 32 tracks&#10;Space play/stop · Esc stop · Ctrl+E export" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
           </StackPanel>
           <ListBox ItemsSource="{Binding Tracks}" SelectedItem="{Binding Selected}" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" IsEnabled="{Binding CanEdit}">
             <ListBox.ItemContainerStyle>
@@ -63,7 +63,7 @@
             <ListBox.ItemTemplate><DataTemplate>
               <StackPanel>
                 <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" Foreground="#DDB879"/>
-                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="#8C99AA" Margin="0,5,0,0"/>
+                <TextBlock Text="{Binding Description}" FontSize="11" Foreground="#8C99AA" Margin="0,5,0,0" TextWrapping="Wrap"/>
                 <TextBlock Foreground="#8C99AA" FontSize="11" Margin="0,4,0,0">
                   <Run Text="{Binding GainDb, StringFormat='{}{0:F1} dB'}"/><Run Text="   /   "/><Run Text="{Binding Azimuth, StringFormat='{}{0:F0}°'}"/>
                 </TextBlock>
@@ -90,9 +90,9 @@
               <TextBlock Text="SPATIAL POSITION" Style="{StaticResource Label}"/>
               <StackPanel Grid.Row="2" Margin="0,8,0,0">
                 <TextBlock Text="{Binding OutputLabels}" Foreground="{StaticResource Accent}" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
-                <TextBlock Text="Drag to pan · stereo sources rotate as a ±30° pair." Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                <TextBlock Text="Drag to pan · stereo sources rotate as a ±30° pair · beds route by channel mask." Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
               </StackPanel>
-              <local:PannerView Grid.Row="1" Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" IsEnabled="{Binding CanEditSelected}" MinHeight="0" AutomationProperties.Name="Surround source position"/>
+              <local:PannerView Grid.Row="1" Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" IsEnabled="{Binding CanPanSelected}" MinHeight="0" AutomationProperties.Name="Surround source position"/>
             </Grid>
           </Border>
           <Border Grid.Column="2" Style="{StaticResource Card}">
@@ -107,9 +107,9 @@
                 <TextBlock Text="{Binding Selected.GainDb, StringFormat='GAIN / {0:F1} dB'}" Margin="0,12,0,0"/>
                 <Slider Value="{Binding Selected.GainDb}" Minimum="-60" Maximum="12" TickFrequency=".5" AutomationProperties.Name="Track gain"/>
                 <TextBlock Text="{Binding Selected.Azimuth, StringFormat='AZIMUTH / {0:F0}°'}"/>
-                <Slider Value="{Binding Selected.Azimuth}" Minimum="-180" Maximum="180" TickFrequency="1" AutomationProperties.Name="Source azimuth"/>
+                <Slider Value="{Binding Selected.Azimuth}" Minimum="-180" Maximum="180" TickFrequency="1" AutomationProperties.Name="Source azimuth" IsEnabled="{Binding CanPanSelected}"/>
                 <TextBlock Text="{Binding Selected.LfeDb, StringFormat='LFE SEND / {0:F1} dB'}"/>
-                <Slider Value="{Binding Selected.LfeDb}" Minimum="-60" Maximum="0" TickFrequency=".5" AutomationProperties.Name="LFE send" IsEnabled="{Binding HasLfe}"/>
+                <Slider Value="{Binding Selected.LfeDb}" Minimum="-60" Maximum="0" TickFrequency=".5" AutomationProperties.Name="LFE send" IsEnabled="{Binding CanSendLfe}"/>
                 <TextBlock Text="−60 dB = off · 120 Hz low-pass" Style="{StaticResource Label}"/>
                 <TextBlock Text="START OFFSET / SECONDS" Style="{StaticResource Label}"/>
                 <TextBox Text="{Binding Selected.StartSeconds, UpdateSourceTrigger=LostFocus, ValidatesOnExceptions=True}" AutomationProperties.Name="Track start offset"/>

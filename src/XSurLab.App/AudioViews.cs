@@ -19,13 +19,12 @@ public sealed class WaveformView : FrameworkElement
         if (Audio is not { } audio || ActualWidth <= 0 || ActualHeight <= 0) return;
         var pen = new Pen(new SolidColorBrush(Color.FromRgb(115, 182, 200)), 1);
         int columns = Math.Max(1, (int)ActualWidth);
-        var samples = audio.Samples.Span;
+        var overview = audio.Overview;
         for (int x = 0; x < columns; x++)
         {
-            int start = (int)((long)x * audio.Frames / columns), end = (int)((long)(x + 1) * audio.Frames / columns);
+            long start = (long)x * overview.Length / columns, end = Math.Max(start + 1, (long)(x + 1) * overview.Length / columns);
             float peak = 0;
-            for (int frame = start; frame < end; frame++)
-                for (int c = 0; c < audio.Channels; c++) peak = Math.Max(peak, Math.Abs(samples[frame * audio.Channels + c]));
+            for (long block = start; block < end && block < overview.Length; block++) peak = Math.Max(peak, overview[block]);
             double half = Math.Clamp(peak, 0, 1) * ActualHeight * .46;
             dc.DrawLine(pen, new(x, ActualHeight / 2 - half), new(x, ActualHeight / 2 + half));
         }

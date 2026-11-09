@@ -33,9 +33,11 @@
     </Style>
     <Style TargetType="CheckBox">
       <Setter Property="Foreground" Value="#E4E9EF"/><Setter Property="Margin" Value="0,6,20,6"/>
+      <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".35"/></Trigger></Style.Triggers>
     </Style>
     <Style TargetType="Slider">
       <Setter Property="Margin" Value="0,8,0,14"/><Setter Property="IsSnapToTickEnabled" Value="True"/>
+      <Style.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value=".35"/></Trigger></Style.Triggers>
     </Style>
     <Style x:Key="Label" TargetType="TextBlock">
       <Setter Property="Foreground" Value="#94A2B4"/><Setter Property="FontSize" Value="11"/>

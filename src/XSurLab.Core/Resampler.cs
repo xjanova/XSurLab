@@ -25,7 +25,7 @@ public sealed class Resampler
     }
 
     /// <summary>Writes each channel's value at a fractional source frame; frames outside the media are silence.</summary>
-    public void Read(AudioBuffer audio, double position, Span<double> values)
+    public void Read(AudioReader audio, double position, Span<double> values)
     {
         values.Clear();
         long center = (long)Math.Floor(position);

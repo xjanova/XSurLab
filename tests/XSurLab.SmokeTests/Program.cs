@@ -13,7 +13,7 @@ try
             var path = Fixture($"source-{format}-{bits}.wav", 2, bits, format, 4, (f, c) => c == 0 ? -.5 : .25);
             var audio = WaveReader.Read(path);
             Equal(audio.Frames, 4); Equal(audio.Channels, 2);
-            Near(audio.Samples.Span[0], -.5, .00004); Near(audio.Samples.Span[1], .25, .00004);
+            Near(audio[0, 0], -.5, .00004); Near(audio[0, 1], .25, .00004);
         }
     });
     Test("Odd-sized unknown chunks and extensible stereo import", () =>
@@ -26,7 +26,7 @@ try
         writer.Write(Encoding.ASCII.GetBytes("JUNK")); writer.Write(1u); writer.Write((byte)7); writer.Write((byte)0);
         writer.Write(original.AsSpan(12)); memory.Position = 4; writer.Write((uint)memory.Length - 8);
         var path = Path.Combine(root, "junk.wav"); File.WriteAllBytes(path, memory.ToArray());
-        Near(WaveReader.Read(path).Samples.Span[0], .125);
+        Near(WaveReader.Read(path)[0, 0], .125);
         var ext = Path.Combine(root, "ext.wav");
         using var extMemory = new MemoryStream(); using var extWriter = new BinaryWriter(extMemory);
         extWriter.Write(original.AsSpan(0, 12)); extWriter.Write(Encoding.ASCII.GetBytes("fmt ")); extWriter.Write(40u);
@@ -35,7 +35,7 @@ try
         extWriter.Write(new Guid("00000001-0000-0010-8000-00aa00389b71").ToByteArray());
         extWriter.Write(original.AsSpan(36)); extMemory.Position = 4; extWriter.Write((uint)extMemory.Length - 8);
         File.WriteAllBytes(ext, extMemory.ToArray());
-        Near(WaveReader.Read(ext).Samples.Span[0], .125);
+        Near(WaveReader.Read(ext)[0, 0], .125);
     });
     Test("Malformed, compressed, multichannel and non-finite audio is rejected", () =>
     {
@@ -46,7 +46,7 @@ try
         var compressed = bytes.ToArray(); compressed[20] = 6;
         var bad = Path.Combine(root, "bad.wav"); File.WriteAllBytes(bad, compressed);
         Throws<InvalidDataException>(() => WaveReader.Read(bad));
-        var multichannel = Fixture("multichannel.wav", 6, 16, 1, 8, (_, _) => .1);
+        var multichannel = Fixture("ambiguous-8ch.wav", 8, 16, 1, 8, (_, _) => .1);
         Throws<InvalidDataException>(() => WaveReader.Read(multichannel));
         var nan = Fixture("nan.wav", 1, 32, 3, 8, (_, _) => double.NaN);
         Throws<InvalidDataException>(() => WaveReader.Read(nan));
@@ -148,7 +148,7 @@ try
         var resampler = new Resampler(44100, 48000); var value = new double[1]; double worst = 0;
         for (int n = 200; n < 47800; n++)
         {
-            resampler.Read(tone, n * resampler.Ratio, value);
+            resampler.Read(tone.OpenReader(), n * resampler.Ratio, value);
             worst = Math.Max(worst, Math.Abs(value[0] - .5 * Math.Sin(2 * Math.PI * 1000 * n / 48000d)));
         }
         Console.WriteLine($"  1 kHz 44.1→48 kHz worst error {20 * Math.Log10(worst / .5):F1} dB");
@@ -158,12 +158,12 @@ try
     {
         var high = new AudioBuffer(96000, 1, Enumerable.Range(0, 96000).Select(i => (float)(.5 * Math.Sin(2 * Math.PI * 30000 * i / 96000))).ToArray());
         var resampler = new Resampler(96000, 48000); var value = new double[1]; double energy = 0;
-        for (int n = 200; n < 47800; n++) { resampler.Read(high, n * resampler.Ratio, value); energy += value[0] * value[0]; }
+        for (int n = 200; n < 47800; n++) { resampler.Read(high.OpenReader(), n * resampler.Ratio, value); energy += value[0] * value[0]; }
         double rms = Math.Sqrt(energy / 47600), reference = .5 / Math.Sqrt(2);
         Console.WriteLine($"  30 kHz 96→48 kHz residue {20 * Math.Log10(rms / reference):F1} dB");
         Check(rms < reference * 1e-4, "Alias residue must stay below -80 dB");
         var dc = new AudioBuffer(44100, 2, Enumerable.Repeat(.25f, 8820).ToArray());
-        var pair = new double[2]; new Resampler(44100, 48000).Read(dc, 2000.37, pair);
+        var pair = new double[2]; new Resampler(44100, 48000).Read(dc.OpenReader(), 2000.37, pair);
         Near(pair[0], .25, 1e-9); Near(pair[1], .25, 1e-9);
     });
     Test("Clipping, cancellation and source overwrite preserve destination and clean scratch", () =>
@@ -479,8 +479,96 @@ try
         WaveRenderer.Render(plain, session, [new(track, media)], new() { BroadcastWave = false });
         Check(!Chunks(File.ReadAllBytes(plain)).ContainsKey("bext"), "bext can be switched off");
     });
+    Test("Multichannel WAV keeps its channel identity; ambiguous layouts are refused", () =>
+    {
+        var side = WaveReader.Read(Fixture("bed-side.wav", 6, 24, 1, 8, (_, c) => c / 10d, 0x60f));
+        Equal(side.ChannelMask, 0x60fu); Near(side[0, 4], .4, 1e-6);
+        Equal(WaveReader.Read(Fixture("bed-plain.wav", 6, 16, 1, 8, (_, _) => .1)).ChannelMask, 0x3fu);
+        Equal(WaveReader.Read(Fixture("bed-714.wav", 12, 16, 1, 8, (_, _) => .1, 0x2d63f)).Channels, 12);
+        Throws<InvalidDataException>(() => WaveReader.Read(Fixture("bed-badmask.wav", 6, 16, 1, 8, (_, _) => .1, 0x3)));
+        Throws<InvalidDataException>(() => WaveReader.Read(Fixture("bed-unknown-bit.wav", 1, 16, 1, 8, (_, _) => .1, 0x40000)));
+    });
+    Test("Beds route channel for channel and fold between 5.1 Side, 5.1 Back, 7.1 and stereo", () =>
+    {
+        var bed = new AudioBuffer(48000, 6, Enumerable.Range(0, 48 * 6).Select(i => (float)((i % 6 + 1) / 10d)).ToArray(), 0x60f);
+        var track = Track("bed51.wav") with { Azimuth = 90, LfeDb = 0 };
+        double[] Render(SpeakerLayout layout, AudioBuffer media)
+        {
+            var path = Path.Combine(root, $"bed-{layout}-{media.Channels}.wav");
+            var result = WaveRenderer.Render(path, Session(layout, track), [new(track, media)]);
+            var bytes = File.ReadAllBytes(path);
+            return Enumerable.Range(0, result.Channels).Select(c => Sample24(bytes, 10, c, result.Channels)).ToArray();
+        }
+        double h = Math.Sqrt(.5);
+        foreach (var (layout, expected) in new (SpeakerLayout, double[])[]
+        {
+            (SpeakerLayout.Surround51, [.1, .2, .3, .4, .5, .6]),
+            (SpeakerLayout.Surround51Back, [.1, .2, .3, .4, .5, .6]),
+            (SpeakerLayout.Surround71, [.1, .2, .3, .4, 0, 0, .5, .6]),
+            (SpeakerLayout.Stereo, [.1 + (.3 + .5) * h, .2 + (.3 + .6) * h]),
+        })
+        {
+            var actual = Render(layout, bed);
+            for (int c = 0; c < expected.Length; c++) Near(actual[c], expected[c]);
+        }
+        var bed71 = new AudioBuffer(48000, 8, Enumerable.Range(0, 48 * 8).Select(i => (float)((i % 8 + 1) / 20d)).ToArray(), 0x63f);
+        var folded = Render(SpeakerLayout.Surround51, bed71);
+        double[] fold = [.05, .10, .15, .20, .25 + .35, .30 + .40];
+        for (int c = 0; c < 6; c++) Near(folded[c], fold[c]);
+        foreach (var layout in Enum.GetValues<SpeakerLayout>())
+        {
+            var speakers = SpatialMixer.Speakers(layout);
+            foreach (var bit in SpatialMixer.Bits(0x3ffff))
+            {
+                var route = SpatialMixer.Route(layout, bit);
+                double power = route.Sum(g => g * g);
+                int index = Array.FindIndex(speakers, s => s.Bit == bit);
+                if (index >= 0) Check(route[index] == 1 && power == 1, $"{layout} must pass {SpatialMixer.ChannelName(bit)} straight through");
+                else if (bit == SpatialMixer.LowFrequency) Equal(power, 0d);
+                else Check(power is > .2 and <= 1 + 1e-9, $"{layout} folds {SpatialMixer.ChannelName(bit)} with power {power:F3}");
+            }
+        }
+    });
+    Test("Streamed media matches decoded media, validates floats, unlocks refused files and lifts the old 64 MiB limit", () =>
+    {
+        foreach (var (format, bits) in new[] { (1, 16), (1, 24), (1, 32), (3, 32) })
+        {
+            var path = Fixture($"mapped-{format}-{bits}.wav", 3, bits, format, 1000, (f, c) => Math.Sin(f * .01 + c) * .7, 0x7);
+            var decoded = WaveReader.Read(path, stream: false); var mapped = WaveReader.Read(path, stream: true);
+            Check(mapped.IsStreamed && !decoded.IsStreamed && mapped.MemoryBytes == 0, "stream selects the storage");
+            Equal(mapped.ChannelMask, 0x7u); Equal(mapped.Frames, 1000L);
+            for (long f = 0; f < 1000; f++) for (int c = 0; c < 3; c++) Equal(mapped[f, c], decoded[f, c]);
+            Check(mapped.Overview.SequenceEqual(decoded.Overview), "Overviews must match");
+        }
+        var nan = Fixture("mapped-nan.wav", 1, 32, 3, 8, (_, _) => double.NaN);
+        Throws<InvalidDataException>(() => WaveReader.Read(nan, stream: true));
+        File.Delete(nan); // a refused import must release the file at once, not at the next garbage collection
+        var large = Path.Combine(root, "large.wav");
+        const int frames = 33 * 1024 * 1024;
+        using (var writer = new BinaryWriter(File.Create(large)))
+        {
+            void Tag(string text) => writer.Write(Encoding.ASCII.GetBytes(text));
+            Tag("RIFF"); writer.Write(36 + frames * 2); Tag("WAVE"); Tag("fmt "); writer.Write(16);
+            writer.Write((ushort)1); writer.Write((ushort)1); writer.Write(48000); writer.Write(96000); writer.Write((ushort)2); writer.Write((ushort)16);
+            Tag("data"); writer.Write(frames * 2);
+            var pattern = Enumerable.Range(0, 2000).SelectMany(f => BitConverter.GetBytes((short)(f - 1000))).ToArray();
+            for (long written = 0; written < frames * 2L; written += pattern.Length)
+                writer.Write(pattern, 0, (int)Math.Min(pattern.Length, frames * 2L - written));
+        }
+        var audio = WaveReader.Read(large);
+        Check(audio.IsStreamed && audio.MemoryBytes == 0, "Files above the threshold are streamed, not decoded");
+        Equal(audio.Frames, (long)frames); Equal(audio.Overview.Length, frames / AudioBuffer.OverviewBlock);
+        foreach (long f in new long[] { 0, 1999, 2000, 12_345_678, frames - 1 }) Equal(audio[f, 0], (f % 2000 - 1000) / 32768f);
+        var reader = audio.OpenReader(); double sum = 0, expected = 0; var clock = System.Diagnostics.Stopwatch.StartNew();
+        for (long f = 0; f < frames; f++) { sum += reader[f, 0]; expected += (f % 2000 - 1000) / 32768f; }
+        Equal(sum, expected);
+        Console.WriteLine($"  streamed {new FileInfo(large).Length / 1048576d:F0} MiB WAV · {audio.Duration:F0} s · sequential read {clock.Elapsed.TotalMilliseconds:F0} ms");
+        using (var cancel = new CancellationTokenSource()) { cancel.Cancel(); Throws<OperationCanceledException>(() => WaveReader.Read(large, cancel.Token)); }
+        File.Move(large, large + ".moved"); File.Delete(large + ".moved"); // delete is shared even while the buffer is alive
+        Equal(audio[0, 0], -1000 / 32768f); // the cached block holds the end, so this reads the deleted file
+    });
 }
-finally { Directory.Delete(root, recursive: true); }
+finally { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); Directory.Delete(root, recursive: true); }
 Console.WriteLine($"{count - failures}/{count} checks passed.");
 Environment.ExitCode = failures == 0 ? 0 : 1;
 
@@ -545,15 +633,20 @@ double Sample24(byte[] bytes, int frame, int channel, int channels)
     int sample = bytes[i] | bytes[i + 1] << 8 | bytes[i + 2] << 16;
     return (sample << 8 >> 8) / 8388608d;
 }
-string Fixture(string name, int channels, int bits, int format, int frames, Func<int, int, double> value)
+string Fixture(string name, int channels, int bits, int format, int frames, Func<int, int, double> value, uint mask = 0)
 {
     var path = Path.Combine(root, name);
     using var writer = new BinaryWriter(File.Create(path));
     int size = frames * channels * bits / 8;
     void Tag(string text) => writer.Write(Encoding.ASCII.GetBytes(text));
-    Tag("RIFF"); writer.Write(36 + size + (size & 1)); Tag("WAVE"); Tag("fmt "); writer.Write(16);
-    writer.Write((ushort)format); writer.Write((ushort)channels); writer.Write(48000);
+    Tag("RIFF"); writer.Write(36 + (mask != 0 ? 24 : 0) + size + (size & 1)); Tag("WAVE"); Tag("fmt "); writer.Write(mask != 0 ? 40 : 16);
+    writer.Write((ushort)(mask != 0 ? 0xfffe : format)); writer.Write((ushort)channels); writer.Write(48000);
     writer.Write(48000 * channels * bits / 8); writer.Write((ushort)(channels * bits / 8)); writer.Write((ushort)bits);
+    if (mask != 0)
+    {
+        writer.Write((ushort)22); writer.Write((ushort)bits); writer.Write(mask);
+        writer.Write(new Guid(format == 3 ? "00000003-0000-0010-8000-00aa00389b71" : "00000001-0000-0010-8000-00aa00389b71").ToByteArray());
+    }
     Tag("data"); writer.Write(size);
     for (int f = 0; f < frames; f++)
         for (int c = 0; c < channels; c++)

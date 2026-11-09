@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using XSurLab.Core;
 
@@ -11,7 +11,10 @@ public sealed class TrackViewModel(TrackSettings settings, AudioBuffer audio) : 
     public TrackSettings Snapshot => settings;
     public string Name { get => settings.Name; set { settings = settings with { Name = value }; Changed(); } }
     public string MediaPath => settings.MediaPath;
-    public string Description => $"{Audio.Channels} ch · {Audio.SampleRate / 1000d:0.#} kHz · {Audio.Duration:0.00} s";
+    /// <summary>Mono and stereo sources are panned; multichannel beds route each channel by its WAVE mask.</summary>
+    public bool CanPan => Audio.Channels <= 2;
+    public string Description => (CanPan ? $"{Audio.Channels} ch" : $"{Audio.Channels} ch bed · {string.Join(" ", SpatialMixer.Bits(Audio.ChannelMask).Select(SpatialMixer.ChannelName))}")
+        + $" · {Audio.SampleRate / 1000d:0.#} kHz · {Audio.Duration:0.00} s{(Audio.IsStreamed ? " · streamed from disk" : "")}";
     public double GainDb { get => settings.GainDb; set { settings = settings with { GainDb = value }; Changed(); } }
     public double Azimuth { get => settings.Azimuth; set { settings = settings with { Azimuth = value }; Changed(); } }
     public double LfeDb { get => settings.LfeDb; set { settings = settings with { LfeDb = value }; Changed(); } }
