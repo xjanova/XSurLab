@@ -53,7 +53,7 @@ try
     });
     Test("Circular panning preserves power, reaches every speaker, excludes LFE", () =>
     {
-        foreach (var layout in new[] { SpeakerLayout.Surround51, SpeakerLayout.Surround71 })
+        foreach (var layout in new[] { SpeakerLayout.Surround51, SpeakerLayout.Surround51Back, SpeakerLayout.Surround71 })
         {
             var speakers = SpatialMixer.Speakers(layout);
             foreach (var (speaker, index) in speakers.Select((s, i) => (s, i)).Where(x => !x.s.IsLfe))
@@ -71,7 +71,7 @@ try
     Test("5.1 / 7.1 exports carry the mask, byte count and center channel in order", () =>
     {
         var media = WaveReader.Read(Fixture("center.wav", 1, 16, 1, 48, (_, _) => .25));
-        foreach (var (layout, channels, mask) in new[] { (SpeakerLayout.Surround51, 6, 0x60fu), (SpeakerLayout.Surround71, 8, 0x63fu) })
+        foreach (var (layout, channels, mask) in new[] { (SpeakerLayout.Surround51, 6, 0x60fu), (SpeakerLayout.Surround51Back, 6, 0x3fu), (SpeakerLayout.Surround71, 8, 0x63fu) })
         {
             var track = Track("center.wav");
             var path = Path.Combine(root, $"{channels}ch.wav");
@@ -184,6 +184,98 @@ try
         Throws<InvalidDataException>(() => SessionStore.Validate(session with { Tracks = [track with { StartSeconds = -1 }] }));
         Throws<InvalidDataException>(() => SessionStore.Validate(session with { Tracks = [track, track] }));
     });
+    Test("Streaming is chunk-invariant with mixed rates, offsets and LFE filter history", () =>
+    {
+        var audio = new AudioBuffer(44100, 2, Enumerable.Range(0, 1800).Select(i => (float)(.1 * Math.Sin(i * .071))).ToArray());
+        var track = Track("stream.wav") with { LfeDb = -3, StartSeconds = .001, Azimuth = 93 };
+        foreach (var layout in Enum.GetValues<SpeakerLayout>())
+        foreach (bool stereo in new[] { false, true })
+        {
+            var session = Session(layout, track);
+            var a = new StreamingMixer(session, [new(track, audio)], stereo);
+            var whole = new double[(int)a.TotalFrames * a.Channels];
+            Equal(a.Read(whole), (int)a.TotalFrames);
+            var b = new StreamingMixer(session, [new(track, audio)], stereo);
+            var chunks = new List<double>();
+            var block = new double[17 * b.Channels];
+            while (b.Position < b.TotalFrames)
+            {
+                int count = b.Read(block) * b.Channels;
+                chunks.AddRange(block.Take(count));
+            }
+            Check(whole.SequenceEqual(chunks), "Chunk boundaries must preserve all samples exactly");
+            Near(a.Peak, b.Peak);
+            var path = Path.Combine(root, $"stream-{layout}-{stereo}.wav");
+            WaveRenderer.Render(path, session, [new(track, audio)], stereo);
+            var bytes = File.ReadAllBytes(path);
+            int header = !stereo && layout != SpeakerLayout.Stereo ? 68 : 44;
+            for (int i = 0; i < whole.Length; i++)
+            {
+                double pcm = stereo ? BitConverter.ToInt16(bytes, header + i * 2) / 32768d
+                    : ((bytes[header + i * 3] | bytes[header + i * 3 + 1] << 8 | bytes[header + i * 3 + 2] << 16) << 8 >> 8) / 8388608d;
+                Near(whole[i], pcm, stereo ? 1d / 32768 : 1d / 8388608);
+            }
+        }
+    });
+    Test("Live gain, master and pan apply on the next block without rewinding", () =>
+    {
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 100).ToArray());
+        var track = Track("live.wav"); var session = Session(SpeakerLayout.Surround51, track);
+        var mixer = new StreamingMixer(session, [new(track, audio)]);
+        var block = new double[6]; mixer.Read(block); Near(block[2], .25);
+        var changed = track with { Azimuth = 110, GainDb = -6 };
+        mixer.Update(session with { MasterGainDb = -6, Tracks = [changed] });
+        mixer.Read(block); Equal(mixer.Position, 2L);
+        Near(block[5], .25 * Math.Pow(10, -.6)); Near(block[2], 0);
+    });
+    Test("Live mute and solo can silence and restore all tracks without stopping", () =>
+    {
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.1f, 20).ToArray());
+        var a = Track("a.wav") with { Azimuth = -30 }; var b = Track("b.wav") with { Azimuth = 30 };
+        var session = Session(SpeakerLayout.Surround51, a, b);
+        var mixer = new StreamingMixer(session, [new(a, audio), new(b, audio)]);
+        var block = new double[6]; mixer.Read(block); Near(block[0], .1); Near(block[1], .1);
+        mixer.Update(session with { Tracks = [a with { Mute = true, Solo = true }, b] });
+        mixer.Read(block); Check(block.All(x => x == 0), "A muted solo track must suppress the other tracks");
+        mixer.Update(session with { Tracks = [a, b with { Solo = true }] });
+        mixer.Read(block); Near(block[0], 0); Near(block[1], .1);
+        mixer.Update(session); mixer.Read(block); Near(block[0], .1); Near(block[1], .1);
+    });
+    Test("Enabling LFE live uses continuous low-pass history", () =>
+    {
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.1f, 200).ToArray());
+        var off = Track("bass.wav"); var on = off with { LfeDb = 0 };
+        var a = new StreamingMixer(Session(SpeakerLayout.Surround51, off), [new(off, audio)]);
+        var b = new StreamingMixer(Session(SpeakerLayout.Surround51, on), [new(on, audio)]);
+        a.Read(new double[100 * 6]); b.Read(new double[100 * 6]);
+        a.Update(Session(SpeakerLayout.Surround51, on));
+        var x = new double[6]; var y = new double[6]; a.Read(x); b.Read(y); Near(x[3], y[3]);
+    });
+    Test("Streaming rejects structural changes atomically and handles final partial blocks", () =>
+    {
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 3).ToArray());
+        var track = Track("short.wav"); var session = Session(SpeakerLayout.Surround51, track);
+        var mixer = new StreamingMixer(session, [new(track, audio)]);
+        Throws<InvalidOperationException>(() => mixer.Update(session with { Layout = SpeakerLayout.Stereo }));
+        Throws<InvalidOperationException>(() => mixer.Update(session with { SampleRate = 96000 }));
+        Throws<InvalidOperationException>(() => mixer.Update(session with { Tracks = [track with { StartSeconds = 1 }] }));
+        Throws<InvalidOperationException>(() => mixer.Update(session with { Tracks = [track with { Id = Guid.NewGuid() }] }));
+        Throws<InvalidOperationException>(() => mixer.Update(session with { Tracks = [track with { MediaPath = "elsewhere.wav" }] }));
+        var block = Enumerable.Repeat(99d, 30).ToArray();
+        Equal(mixer.Read(block), 3); Near(block[2], .25); Check(block.Skip(18).All(x => x == 0), "Tail must be cleared");
+        Equal(mixer.Read(block), 0); Check(block.All(x => x == 0), "EOF must clear stale audio");
+        Throws<ArgumentException>(() => mixer.Read(new double[7]));
+    });
+    Test("Streaming cancellation and invalid samples never submit a broken block", () =>
+    {
+        var track = Track("cancel-live.wav");
+        var session = Session(SpeakerLayout.Surround51, track);
+        var mixer = new StreamingMixer(session, [new(track, new AudioBuffer(48000, 1, new float[10]))]);
+        using var cancel = new CancellationTokenSource(); cancel.Cancel();
+        Throws<OperationCanceledException>(() => mixer.Read(new double[6], cancel.Token)); Equal(mixer.Position, 0L);
+        var invalid = new StreamingMixer(session, [new(track, new AudioBuffer(48000, 1, [float.NaN]))]);
+        Throws<InvalidDataException>(() => invalid.Read(new double[6]));
+    });
 }
 finally { Directory.Delete(root, recursive: true); }
 Console.WriteLine($"{count - failures}/{count} checks passed.");
@@ -237,4 +329,5 @@ string Fixture(string name, int channels, int bits, int format, int frames, Func
     if ((size & 1) != 0) writer.Write((byte)0);
     return path;
 }
+
 

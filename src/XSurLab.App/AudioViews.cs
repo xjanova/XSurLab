@@ -95,6 +95,9 @@ public sealed class DisplayValueConverter : System.Windows.Data.IValueConverter
         SpeakerLayout.Stereo => "Stereo 2.0",
         SpeakerLayout.Surround51 => "5.1 Surround",
         SpeakerLayout.Surround71 => "7.1 Surround",
+        SpeakerLayout.Surround51Back => "5.1 Back",
+        LayoutOption option => option.Name,
+        XSurLab.Audio.AudioDevice device => device.DisplayName,
         int rate => $"{rate / 1000d:0.#} kHz",
         _ => value.ToString() ?? ""
     };

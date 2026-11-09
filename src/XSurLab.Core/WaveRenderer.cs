@@ -14,19 +14,12 @@ public static class WaveRenderer
     public static RenderResult Render(string destination, SessionDocument session, IReadOnlyList<LoadedTrack> tracks,
         bool stereoMonitor = false, CancellationToken cancellationToken = default, IProgress<double>? progress = null)
     {
-        SessionStore.Validate(session);
-        if (!session.Tracks.SequenceEqual(tracks.Select(t => t.Settings)))
-            throw new InvalidDataException("Loaded media does not match the session.");
+        var mixer = new StreamingMixer(session, tracks, stereoMonitor);
         destination = Path.GetFullPath(destination);
         if (tracks.Any(t => string.Equals(Path.GetFullPath(t.Settings.MediaPath), destination, StringComparison.OrdinalIgnoreCase)))
             throw new IOException("Choose a different filename; source media cannot be overwritten.");
-        bool anySolo = tracks.Any(t => t.Settings.Solo);
-        var active = tracks.Where(t => !t.Settings.Mute && (!anySolo || t.Settings.Solo)).ToArray();
-        if (active.Length == 0) throw new InvalidOperationException("No audible tracks. Import audio or check mute/solo.");
-        var rate = session.SampleRate;
-        long frames = tracks.Max(t => (long)Math.Round(t.Settings.StartSeconds * rate) + (long)Math.Ceiling(t.Audio.Duration * rate));
-        if (frames <= 0 || frames > 3600L * rate) throw new InvalidDataException("Render duration must be between zero and one hour.");
-        int channels = stereoMonitor ? 2 : SpatialMixer.Speakers(session.Layout).Length;
+        int rate = mixer.SampleRate, channels = mixer.Channels;
+        long frames = mixer.TotalFrames;
         int bits = stereoMonitor ? 16 : 24;
         long bytes = checked(frames * channels * (bits / 8));
         if (bytes > uint.MaxValue - 60) throw new InvalidDataException("Output exceeds the RIFF 4 GiB limit. Shorten the session.");
@@ -38,20 +31,15 @@ public static class WaveRenderer
             using (var writer = new BinaryWriter(stream, Encoding.ASCII))
             {
                 WriteHeader(writer, rate, channels, bits, (uint)bytes, stereoMonitor ? 3u : SpatialMixer.ChannelMask(session.Layout));
-                var states = active.Select(t => new TrackState(t, session.Layout, rate)).ToArray();
-                var mix = new double[SpatialMixer.Speakers(session.Layout).Length];
-                var stereo = new double[2];
-                double master = session.MasterGainDb <= -60 ? 0 : Math.Pow(10, session.MasterGainDb / 20);
-                for (long frame = 0; frame < frames; frame++)
+                var buffer = new double[1024 * channels];
+                while (mixer.Position < mixer.TotalFrames)
                 {
-                    if (frame % 4096 == 0) { cancellationToken.ThrowIfCancellationRequested(); progress?.Report((double)frame / frames); }
-                    Array.Clear(mix);
-                    foreach (var state in states) state.Add(frame, mix);
-                    if (stereoMonitor) SpatialMixer.FoldStereo(mix, session.Layout, stereo);
-                    var output = stereoMonitor ? stereo : mix;
-                    for (int channel = 0; channel < channels; channel++)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    progress?.Report((double)mixer.Position / frames);
+                    int count = mixer.Read(buffer, cancellationToken) * channels;
+                    for (int sample = 0; sample < count; sample++)
                     {
-                        double value = output[channel] * master;
+                        double value = buffer[sample];
                         peak = Math.Max(peak, Math.Abs(value));
                         if (bits == 16) writer.Write((short)Math.Clamp(Math.Round(value * 32768), short.MinValue, short.MaxValue));
                         else
@@ -88,55 +76,5 @@ public static class WaveRenderer
         Tag("data"); writer.Write(bytes);
     }
 
-    private sealed class TrackState
-    {
-        private readonly LoadedTrack track;
-        private readonly double[] left, right;
-        private readonly double gain, lfe, ratio;
-        private readonly long offset;
-        private readonly LowPass filter;
-
-        public TrackState(LoadedTrack track, SpeakerLayout layout, int rate)
-        {
-            this.track = track;
-            bool stereo = track.Audio.Channels == 2;
-            left = SpatialMixer.Pan(layout, track.Settings.Azimuth - (stereo ? 30 : 0));
-            right = SpatialMixer.Pan(layout, track.Settings.Azimuth + (stereo ? 30 : 0));
-            gain = track.Settings.GainDb <= -60 ? 0 : Math.Pow(10, track.Settings.GainDb / 20);
-            lfe = track.Settings.LfeDb <= -60 || layout == SpeakerLayout.Stereo ? 0 : Math.Pow(10, track.Settings.LfeDb / 20);
-            ratio = (double)track.Audio.SampleRate / rate;
-            offset = (long)Math.Round(track.Settings.StartSeconds * rate);
-            filter = new LowPass(rate);
-        }
-
-        public void Add(long frame, double[] output)
-        {
-            double source = (frame - offset) * ratio;
-            if (source < 0) return;
-            double a = track.Audio.Sample(source, 0) * gain;
-            bool stereo = track.Audio.Channels == 2;
-            double b = stereo ? track.Audio.Sample(source, 1) * gain : 0;
-            for (int c = 0; c < output.Length; c++) output[c] += a * left[c] + b * right[c];
-            if (lfe > 0) output[3] += filter.Process(stereo ? (a + b) * .5 : a) * lfe;
-        }
-    }
-
-    private sealed class LowPass
-    {
-        private readonly double b0, b1, b2, a1, a2;
-        private double z1, z2;
-        public LowPass(int sampleRate)
-        {
-            double w = 2 * Math.PI * 120 / sampleRate, cos = Math.Cos(w), alpha = Math.Sin(w) / Math.Sqrt(2), a0 = 1 + alpha;
-            b0 = (1 - cos) / 2 / a0; b1 = (1 - cos) / a0; b2 = b0;
-            a1 = -2 * cos / a0; a2 = (1 - alpha) / a0;
-        }
-        public double Process(double input)
-        {
-            double value = b0 * input + z1;
-            z1 = b1 * input - a1 * value + z2;
-            z2 = b2 * input - a2 * value;
-            return value;
-        }
-    }
 }
+

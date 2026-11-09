@@ -8,6 +8,7 @@ public static class SpatialMixer
     {
         SpeakerLayout.Stereo => [new("L", -30), new("R", 30)],
         SpeakerLayout.Surround51 => [new("L", -30), new("R", 30), new("C", 0), new("LFE", 0, true), new("Ls", -110), new("Rs", 110)],
+        SpeakerLayout.Surround51Back => [new("L", -30), new("R", 30), new("C", 0), new("LFE", 0, true), new("Lb", -110), new("Rb", 110)],
         SpeakerLayout.Surround71 => [new("L", -30), new("R", 30), new("C", 0), new("LFE", 0, true), new("Lb", -150), new("Rb", 150), new("Ls", -90), new("Rs", 90)],
         _ => throw new ArgumentOutOfRangeException(nameof(layout))
     };
@@ -16,6 +17,7 @@ public static class SpatialMixer
     {
         SpeakerLayout.Stereo => 0x3,
         SpeakerLayout.Surround51 => 0x60f,
+        SpeakerLayout.Surround51Back => 0x3f,
         SpeakerLayout.Surround71 => 0x63f,
         _ => throw new ArgumentOutOfRangeException(nameof(layout))
     };

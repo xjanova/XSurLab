@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace XSurLab.Core;
 
-public enum SpeakerLayout { Stereo, Surround51, Surround71 }
+public enum SpeakerLayout { Stereo, Surround51, Surround71, Surround51Back }
 
 public sealed record TrackSettings
 {

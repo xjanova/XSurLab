@@ -2,7 +2,7 @@
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="clr-namespace:XSurLab.App"
- Title="XSurLab · Surround Studio" Width="1240" Height="850" MinWidth="1000" MinHeight="720"
+ Title="XSurLab · Surround Studio" Width="1240" Height="850" MinWidth="1000" MinHeight="820"
  Background="#11151A" Foreground="#E4E9EF" FontFamily="Segoe UI" FontSize="13"
  Closing="Window_Closing">
   <Grid Margin="24">
@@ -12,7 +12,7 @@
     <DockPanel Margin="0,0,0,22">
       <StackPanel DockPanel.Dock="Left">
         <TextBlock Text="XSurLab" FontSize="28" FontWeight="SemiBold" Foreground="{StaticResource Accent}"/>
-        <TextBlock Text="SURROUND STUDIO / 0.1" Style="{StaticResource Label}" Margin="1,5,0,0"/>
+        <TextBlock Text="SURROUND STUDIO / 0.2" Style="{StaticResource Label}" Margin="1,5,0,0"/>
       </StackPanel>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
         <Button Content="New" Click="New_Click" IsEnabled="{Binding CanEdit}"/>
@@ -30,7 +30,7 @@
         </StackPanel>
         <StackPanel Grid.Column="1" IsEnabled="{Binding CanEdit}" Margin="0,0,14,0">
           <TextBlock Text="SPEAKER LAYOUT" Style="{StaticResource Label}"/>
-          <ComboBox ItemsSource="{Binding Layouts}" SelectedItem="{Binding Layout}" AutomationProperties.Name="Speaker layout"/>
+          <ComboBox ItemsSource="{Binding Layouts}" SelectedValue="{Binding Layout}" SelectedValuePath="Layout" AutomationProperties.Name="Speaker layout"/>
         </StackPanel>
         <StackPanel Grid.Column="2" IsEnabled="{Binding CanEdit}" Margin="0,0,14,0">
           <TextBlock Text="SAMPLE RATE" Style="{StaticResource Label}"/>
@@ -73,7 +73,7 @@
         </DockPanel>
       </Border>
       <Grid Grid.Column="2">
-        <Grid.RowDefinitions><RowDefinition Height="155"/><RowDefinition Height="16"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="110"/><RowDefinition Height="16"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <Border Style="{StaticResource Card}">
           <Grid>
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -85,17 +85,17 @@
         <Grid Grid.Row="2">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/><ColumnDefinition Width="280"/></Grid.ColumnDefinitions>
           <Border Style="{StaticResource Card}">
-            <DockPanel>
-              <StackPanel DockPanel.Dock="Top">
+            <Grid>
+              <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+              <StackPanel>
                 <TextBlock Text="SPATIAL POSITION" Style="{StaticResource Label}"/>
-                <TextBlock Text="Place your sound." FontSize="21" Margin="0,0,0,8"/>
               </StackPanel>
-              <StackPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
+              <StackPanel Grid.Row="2" Margin="0,8,0,0">
                 <TextBlock Text="{Binding OutputLabels}" Foreground="{StaticResource Accent}" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
-                <TextBlock Text="Drag the source around the listening position.&#10;Stereo sources rotate as a ±30° pair." Foreground="{StaticResource Muted}" FontSize="11" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                <TextBlock Text="Drag to pan · stereo sources rotate as a ±30° pair." Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
               </StackPanel>
-              <local:PannerView Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" IsEnabled="{Binding CanEditSelected}" MinHeight="180" AutomationProperties.Name="Surround source position"/>
-            </DockPanel>
+              <local:PannerView Grid.Row="1" Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" IsEnabled="{Binding CanEditSelected}" MinHeight="0" AutomationProperties.Name="Surround source position"/>
+            </Grid>
           </Border>
           <Border Grid.Column="2" Style="{StaticResource Card}">
             <ScrollViewer VerticalScrollBarVisibility="Auto">
@@ -123,16 +123,30 @@
     </Grid>
     <Border Grid.Row="3" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Margin="0,18,0,0" Padding="0,16,0,0">
       <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Top">
-          <Button Content="▶  Stereo preview" Click="Play_Click" IsEnabled="{Binding CanRender}"/>
+        <Grid Grid.ColumnSpan="3" Margin="0,0,0,12" IsEnabled="{Binding CanEdit}">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+          <StackPanel Margin="0,0,12,0">
+            <TextBlock Text="WASAPI / SHARED OUTPUT" Style="{StaticResource Label}"/>
+            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedOutput}" AutomationProperties.Name="Monitor output device"/>
+          </StackPanel>
+          <Button Grid.Column="1" Content="Refresh outputs" Click="RefreshOutputs_Click" VerticalAlignment="Bottom"/>
+          <CheckBox Grid.Column="2" Content="Stereo fold-down" IsChecked="{Binding StereoMonitor}" VerticalAlignment="Bottom" Margin="12,0,18,8" ToolTip="Clear to send the session's discrete channels. The device must have the matching Windows speaker layout."/>
+          <StackPanel Grid.Column="3">
+            <TextBlock Text="{Binding MonitorVolume, StringFormat='MONITOR / {0:P0}'}" Style="{StaticResource Label}"/>
+            <Slider Value="{Binding MonitorVolume}" Minimum="0" Maximum="1" AutomationProperties.Name="Monitor volume"/>
+          </StackPanel>
+        </Grid>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" VerticalAlignment="Top">
+          <Button Content="▶  Play monitor" Click="Play_Click" IsEnabled="{Binding CanPlay}"/>
           <Button Content="■  Stop / cancel" Click="Stop_Click"/>
         </StackPanel>
-        <StackPanel Grid.Column="1" Margin="14,0">
+        <StackPanel Grid.Row="1" Grid.Column="1" Margin="14,0">
           <TextBlock Text="{Binding Status}" TextWrapping="Wrap" FontSize="12"/>
           <TextBlock Text="{Binding RenderSummary}" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
         </StackPanel>
-        <Button Grid.Column="2" Content="Export PCM WAV →" Click="Export_Click" IsEnabled="{Binding CanRender}" VerticalAlignment="Top" Margin="0" Background="#3E3527" BorderBrush="{StaticResource Accent}"/>
+        <Button Grid.Row="1" Grid.Column="2" Content="Export PCM WAV →" Click="Export_Click" IsEnabled="{Binding CanRender}" VerticalAlignment="Top" Margin="0" Background="#3E3527" BorderBrush="{StaticResource Accent}"/>
       </Grid>
     </Border>
   </Grid>

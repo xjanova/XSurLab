@@ -12,4 +12,4 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet build XSurLab.slnx -c Release
-      - run: dotnet run --project tests/XSurLab.SmokeTests -c Release --no-build
+      - run: ./scripts/Verify.ps1
