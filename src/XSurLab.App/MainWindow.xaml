@@ -15,6 +15,8 @@
         <TextBlock Text="SURROUND STUDIO / 0.3" Style="{StaticResource Label}" Margin="1,5,0,0"/>
       </StackPanel>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+        <Button Content="Undo" Click="Undo_Click" IsEnabled="{Binding CanUndo}" ToolTip="{Binding UndoText}" ToolTipService.ShowOnDisabled="True" AutomationProperties.HelpText="{Binding UndoText}"/>
+        <Button Content="Redo" Click="Redo_Click" IsEnabled="{Binding CanRedo}" ToolTip="{Binding RedoText}" ToolTipService.ShowOnDisabled="True" AutomationProperties.HelpText="{Binding RedoText}" Margin="0,0,22,0"/>
         <Button Content="New" Click="New_Click" IsEnabled="{Binding CanEdit}" ToolTip="Ctrl+N"/>
         <Button Content="Open session" Click="Open_Click" IsEnabled="{Binding CanEdit}" ToolTip="Ctrl+O"/>
         <Button Content="Save session" Click="Save_Click" IsEnabled="{Binding CanEdit}" ToolTip="Ctrl+S"/>
@@ -52,7 +54,7 @@
           </StackPanel>
           <StackPanel DockPanel.Dock="Bottom" Margin="4,12,4,0">
             <Button Content="Remove selected track" Click="Remove_Click" IsEnabled="{Binding CanEditSelected}" Margin="0,0,0,12"/>
-            <TextBlock Text="Mono, stereo or multichannel WAV · 32 tracks&#10;Space play/stop · Esc stop · Ctrl+E export · Ctrl+D deliver" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
+            <TextBlock Text="Mono, stereo or multichannel WAV · 32 tracks&#10;Space play/stop from the playhead · Esc stop · Ctrl+Z / Ctrl+Y undo / redo · Ctrl+E export · Ctrl+D deliver" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap"/>
           </StackPanel>
           <ListBox ItemsSource="{Binding Tracks}" SelectedItem="{Binding Selected}" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" IsEnabled="{Binding CanEdit}">
             <ListBox.ItemContainerStyle>
@@ -71,12 +73,15 @@
         </DockPanel>
       </Border>
       <Grid Grid.Column="2">
-        <Grid.RowDefinitions><RowDefinition Height="110"/><RowDefinition Height="16"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Grid.RowDefinitions><RowDefinition Height="160"/><RowDefinition Height="16"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <Border Style="{StaticResource Card}">
           <Grid>
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-            <TextBlock Text="SOURCE WAVEFORM" Style="{StaticResource Label}"/>
-            <local:WaveformView Grid.Row="1" Audio="{Binding Selected.Audio}" Margin="0,4" AutomationProperties.Name="Selected source waveform"/>
+            <DockPanel>
+              <TextBlock DockPanel.Dock="Right" Text="{Binding PlayheadText}" FontFamily="Consolas" FontSize="11" Foreground="{StaticResource Accent}" AutomationProperties.Name="Playhead position"/>
+              <TextBlock Text="TIMELINE · CLICK THE RULER FOR THE PLAYHEAD · DRAG A CLIP TO MOVE IT (SHIFT = NO SNAP)" Style="{StaticResource Label}" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+            <local:TimelineView Grid.Row="1" Tracks="{Binding Tracks}" Selected="{Binding Selected, Mode=TwoWay}" Playhead="{Binding PlayheadSeconds, Mode=TwoWay}" IsEnabled="{Binding CanEdit}" Margin="0,4" AutomationProperties.Name="Session timeline" AutomationProperties.HelpText="Left and Right move the playhead by one second, Shift for a tenth; Home and End jump to the session start and end."/>
             <TextBlock Grid.Row="2" Text="{Binding Selected.MediaPath, FallbackValue='No media selected', TargetNullValue='No media selected'}" FontSize="11" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis"/>
           </Grid>
         </Border>

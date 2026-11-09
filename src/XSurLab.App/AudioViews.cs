@@ -6,31 +6,6 @@ using XSurLab.Core;
 
 namespace XSurLab.App;
 
-public sealed class WaveformView : FrameworkElement
-{
-    public static readonly DependencyProperty AudioProperty = DependencyProperty.Register(nameof(Audio), typeof(AudioBuffer), typeof(WaveformView),
-        new FrameworkPropertyMetadata(null, FrameworkPropertyMetadataOptions.AffectsRender));
-    public AudioBuffer? Audio { get => (AudioBuffer?)GetValue(AudioProperty); set => SetValue(AudioProperty, value); }
-
-    protected override void OnRender(DrawingContext dc)
-    {
-        var line = new Pen(new SolidColorBrush(Color.FromRgb(48, 57, 68)), 1);
-        dc.DrawLine(line, new(0, ActualHeight / 2), new(ActualWidth, ActualHeight / 2));
-        if (Audio is not { } audio || ActualWidth <= 0 || ActualHeight <= 0) return;
-        var pen = new Pen(new SolidColorBrush(Color.FromRgb(115, 182, 200)), 1);
-        int columns = Math.Max(1, (int)ActualWidth);
-        var overview = audio.Overview;
-        for (int x = 0; x < columns; x++)
-        {
-            long start = (long)x * overview.Length / columns, end = Math.Max(start + 1, (long)(x + 1) * overview.Length / columns);
-            float peak = 0;
-            for (long block = start; block < end && block < overview.Length; block++) peak = Math.Max(peak, overview[block]);
-            double half = Math.Clamp(peak, 0, 1) * ActualHeight * .46;
-            dc.DrawLine(pen, new(x, ActualHeight / 2 - half), new(x, ActualHeight / 2 + half));
-        }
-    }
-}
-
 /// <summary>
 /// Top-down panner. Ear-level speakers sit on the outer ring; height speakers and elevated sources are drawn where they
 /// project onto the floor (radius × cos elevation), so the centre is straight overhead. The arc shows the spread.

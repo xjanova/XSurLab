@@ -40,11 +40,39 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string? lastDelivery;
     private int eqBand = 2;
     private string momentaryText = "M   —", shortTermText = "S   —", integratedText = "I   — LUFS", truePeakText = "TP  — dBTP";
+    private double playhead;
+    private long playFrom;
+    // Undo keeps whole-session snapshots. Continuous edits of one control (a slider drag, typing) become one step.
+    private readonly EditHistory<SessionState> history;
+    private readonly DispatcherTimer commitTimer = new() { Interval = TimeSpan.FromMilliseconds(600) };
+    private PendingEdit? pending;
+    private SessionState? savedState;
+    private bool restoring;
 
-    public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit(audio: false); } }
-    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(HeightHint)); Changed(nameof(CanSendLfe)); Edit(restart: true); ResetMeters(); } }
-    public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit(restart: true); } }
-    public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit(); } }
+    public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit("session-name", "session name", audio: false); } }
+    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(HeightHint)); Changed(nameof(CanSendLfe)); Edit("layout", "speaker layout", restart: true, commit: true); ResetMeters(); } }
+    public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit("rate", "sample rate", restart: true, commit: true); } }
+    public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit("master", "master gain"); } }
+    /// <summary>Seconds from the session start. Setting it while playing seeks the monitor.</summary>
+    public double PlayheadSeconds
+    {
+        get => playhead;
+        set
+        {
+            ShowPlayhead(double.IsFinite(value) ? value : 0);
+            if (liveMixer is { } mixer && player is not null)
+            {
+                // The end of playback returns here, to the last place the user chose.
+                playFrom = Math.Min((long)Math.Round(playhead * mixer.SampleRate), mixer.TotalFrames);
+                mixer.Seek(playFrom);
+            }
+        }
+    }
+    public string PlayheadText => $"{TimelineView.Clock(playhead)} / {TimelineView.Clock(TimelineView.End(Tracks))}";
+    public bool CanUndo => CanEdit && (pending is not null || history.CanUndo);
+    public bool CanRedo => CanEdit && pending is null && history.CanRedo;
+    public string UndoText => CanUndo ? $"Undo {pending?.Label ?? history.UndoLabel} · Ctrl+Z" : "Nothing to undo";
+    public string RedoText => CanRedo ? $"Redo {history.RedoLabel} · Ctrl+Y" : "Nothing to redo";
     public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); BandChanged(); } }
     public bool CanPanSelected => CanEditSelected && Selected?.CanPan == true;
     public bool CanSendLfe => CanPanSelected && HasLfe;
@@ -93,6 +121,9 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     public MainWindow()
     {
+        history = new(Capture(), SameState.Instance);
+        savedState = history.Current;
+        commitTimer.Tick += (_, _) => Flush();
         InitializeComponent();
         DataContext = this;
         meterTimer.Tick += MeterTick;
@@ -119,8 +150,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
 
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
-    private void Edit(bool restart = false, bool audio = true)
+    /// <param name="key">Edits with the same key in a row merge into one undo step until a pause or another edit.</param>
+    /// <param name="commit">Records the undo step at once, for discrete edits such as mute or a clip move.</param>
+    private void Edit(string key, string label, bool restart = false, bool audio = true, bool commit = false)
     {
+        if (restoring) return;
+        if (pending is { } previous && previous.Key != key) history.Record(previous.State, previous.Label);
+        pending = new(Capture(), label, key);
+        commitTimer.Stop();
+        if (commit) Flush(); else { commitTimer.Start(); UndoChanged(); }
         dirty = true;
         if (player is not null && audio)
         {
@@ -138,16 +176,119 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         busy = value;
         Changed(nameof(CanEdit)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected)); Changed(nameof(CanDither));
-        Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe));
+        Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); UndoChanged();
     }
     private void TrackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName is not (nameof(TrackViewModel.Name) or nameof(TrackViewModel.Group) or nameof(TrackViewModel.Summary)));
-        if (e.PropertyName == nameof(TrackViewModel.Eq) && ReferenceEquals(sender, Selected)) BandChanged();
+        if (sender is not TrackViewModel track || e.PropertyName is nameof(TrackViewModel.Summary) or "" or null) return;
+        string property = e.PropertyName;
+        Edit($"{track.Snapshot.Id}:{property}", $"{Describe(property)} · {track.Name}",
+            restart: property == nameof(TrackViewModel.StartSeconds),
+            audio: property is not (nameof(TrackViewModel.Name) or nameof(TrackViewModel.Group)),
+            commit: property is nameof(TrackViewModel.Mute) or nameof(TrackViewModel.Solo) or nameof(TrackViewModel.StartSeconds) or nameof(TrackViewModel.Group));
+        if (property == nameof(TrackViewModel.StartSeconds)) Changed(nameof(PlayheadText));
+        if (property == nameof(TrackViewModel.Eq) && ReferenceEquals(sender, Selected)) BandChanged();
     }
+    private static string Describe(string property) => property switch
+    {
+        nameof(TrackViewModel.GainDb) => "gain", nameof(TrackViewModel.Azimuth) => "azimuth", nameof(TrackViewModel.Elevation) => "elevation",
+        nameof(TrackViewModel.Spread) => "spread", nameof(TrackViewModel.Eq) => "EQ", nameof(TrackViewModel.LfeDb) => "LFE send",
+        nameof(TrackViewModel.StartSeconds) => "start", nameof(TrackViewModel.Mute) => "mute", nameof(TrackViewModel.Solo) => "solo",
+        nameof(TrackViewModel.Name) => "track name", nameof(TrackViewModel.Group) => "group", _ => "track"
+    };
     private void RefreshTracks()
     {
         Changed(nameof(TrackSummary)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected));
+        ShowPlayhead(playhead);
+    }
+    // Moves the playhead without seeking: following playback, or keeping it inside the session after an edit.
+    private void ShowPlayhead(double seconds)
+    {
+        playhead = Math.Clamp(seconds, 0, TimelineView.End(Tracks));
+        Changed(nameof(PlayheadSeconds)); Changed(nameof(PlayheadText));
+    }
+
+    private SessionState Capture() => new(Snapshot(), Tracks.Select(t => t.Audio).ToArray());
+    private void UndoChanged() { Changed(nameof(CanUndo)); Changed(nameof(CanRedo)); Changed(nameof(UndoText)); Changed(nameof(RedoText)); }
+    private void Flush()
+    {
+        commitTimer.Stop();
+        if (pending is { } edit) { pending = null; history.Record(edit.State, edit.Label); }
+        UndoChanged();
+    }
+    private void ResetHistory()
+    {
+        commitTimer.Stop(); pending = null;
+        history.Reset(Capture()); savedState = history.Current;
+        UndoChanged();
+    }
+    private void Undo()
+    {
+        if (busy) return;
+        Flush();
+        if (!history.CanUndo) return;
+        string label = history.UndoLabel!;
+        Apply(history.Undo());
+        Status = $"Undid {label}.";
+    }
+    private void Redo()
+    {
+        if (busy) return;
+        Flush();
+        if (!history.CanRedo) return;
+        Apply(history.Redo());
+        Status = $"Redid {history.UndoLabel}.";
+    }
+    private void Undo_Click(object sender, RoutedEventArgs e) => Undo();
+    private void Redo_Click(object sender, RoutedEventArgs e) => Redo();
+
+    // Puts a snapshot back. Tracks keep their view model (and selection) when they still exist; removed ones come back with their media.
+    private void Apply(SessionState state)
+    {
+        var document = state.Document;
+        var before = Snapshot();
+        bool restart = document.Layout != before.Layout || document.SampleRate != before.SampleRate || document.Tracks.Count != before.Tracks.Count
+            || document.Tracks.Zip(before.Tracks).Any(p => p.First.Id != p.Second.Id || p.First.StartSeconds != p.Second.StartSeconds);
+        var selectedId = Selected?.Snapshot.Id;
+        restoring = true;
+        try
+        {
+            SessionName = document.Name; Layout = document.Layout; SampleRate = document.SampleRate; MasterGainDb = document.MasterGainDb;
+            var existing = Tracks.ToDictionary(t => t.Snapshot.Id);
+            var wanted = new List<TrackViewModel>();
+            TrackViewModel? returned = null;
+            for (int i = 0; i < document.Tracks.Count; i++)
+            {
+                var settings = document.Tracks[i];
+                if (existing.Remove(settings.Id, out var track)) track.Restore(settings);
+                else { track = new TrackViewModel(settings, state.Media[i]); returned ??= track; }
+                wanted.Add(track);
+            }
+            // A track that comes back is selected, so the undo is visible where it happened.
+            if (returned is not null) selectedId = returned.Snapshot.Id;
+            foreach (var gone in existing.Values) { gone.PropertyChanged -= TrackChanged; Tracks.Remove(gone); }
+            for (int i = 0; i < wanted.Count; i++)
+            {
+                int at = Tracks.IndexOf(wanted[i]);
+                if (at < 0) { wanted[i].PropertyChanged += TrackChanged; Tracks.Insert(i, wanted[i]); }
+                else if (at != i) Tracks.Move(at, i);
+            }
+            Selected = Tracks.FirstOrDefault(t => t.Snapshot.Id == selectedId) ?? Tracks.FirstOrDefault();
+        }
+        finally { restoring = false; }
+        if (player is not null)
+        {
+            if (restart) { StopPlayback(); Status = "Playback stopped · the undone edit changed media, offsets, layout or rate."; }
+            else
+            {
+                try { liveMixer?.Update(Snapshot()); }
+                catch (Exception ex) { StopPlayback(); Status = ex.Message; }
+            }
+        }
+        dirty = !ReferenceEquals(history.Current, savedState);
+        Title = $"XSurLab · {SessionName}{(dirty ? " *" : "")}";
+        RenderSummary = "Settings changed · render to measure sample peak.";
+        RefreshTracks(); BandChanged(); UndoChanged();
     }
     private void Add(TrackViewModel track) { track.PropertyChanged += TrackChanged; Tracks.Add(track); }
     private void ClearTracks()
@@ -169,6 +310,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     }
     private void Saved()
     {
+        Flush(); savedState = history.Current;
         dirty = false;
         Title = $"XSurLab · {SessionName}";
     }
@@ -195,7 +337,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }), used, token), token);
             foreach (var track in loaded) Add(track);
             Selected = loaded.FirstOrDefault();
-            Edit(); Status = $"Imported {loaded.Count} track(s)."; RefreshTracks();
+            Edit("import", loaded.Count == 1 ? $"import · {loaded[0].Name}" : $"import of {loaded.Count} tracks", commit: true);
+            Status = $"Imported {loaded.Count} track(s)."; RefreshTracks();
         }
         catch (OperationCanceledException) { Status = "Operation cancelled."; }
         catch (Exception ex) { Error(ex); }
@@ -211,7 +354,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             try { audio = WaveReader.Read(item.MediaPath, cancellationToken); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             { throw new IOException($"Cannot import '{item.MediaPath}': {ex.Message}", ex); }
-            // Files above WaveReader.MapThreshold are memory-mapped and do not count; this bounds the small decoded ones.
+            // Files above WaveReader.StreamThreshold stream from disk and do not count; this bounds the small decoded ones.
             used += audio.MemoryBytes;
             if (used > 1L << 30) throw new InvalidDataException("Decoded session audio exceeds 1 GiB.");
             loaded.Add(new(item, audio));
@@ -239,7 +382,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             SessionName = document.Name; Layout = document.Layout; SampleRate = document.SampleRate; MasterGainDb = document.MasterGainDb;
             foreach (var track in loaded) Add(track);
             Selected = Tracks.FirstOrDefault(); sessionPath = Path.GetFullPath(file);
-            Saved(); RefreshTracks(); Status = "Session opened · all media resolved.";
+            ShowPlayhead(0); ResetHistory(); Saved(); RefreshTracks(); Status = "Session opened · all media resolved.";
         }
         catch (OperationCanceledException) { Status = "Operation cancelled."; }
         catch (Exception ex) { Error(ex); }
@@ -250,7 +393,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         if (!ConfirmDiscard()) return;
         StopPlayback(); ClearTracks(); sessionPath = null;
         SessionName = "Untitled session"; Layout = SpeakerLayout.Surround51; SampleRate = 48000; MasterGainDb = -6;
-        Saved(); RefreshTracks(); Status = "New session · import WAV to begin.";
+        ShowPlayhead(0); ResetHistory(); Saved(); RefreshTracks(); Status = "New session · import WAV to begin.";
     }
     private void Save_Click(object sender, RoutedEventArgs e) => SaveSession();
     private bool SaveSession()
@@ -272,7 +415,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (Selected is not { } track) return;
         StopPlayback(); track.PropertyChanged -= TrackChanged; Tracks.Remove(track);
-        Selected = Tracks.FirstOrDefault(); Edit(); RefreshTracks(); Status = "Track removed · source file preserved.";
+        Selected = Tracks.FirstOrDefault(); Edit("remove", $"removal · {track.Name}", commit: true); RefreshTracks();
+        Status = "Track removed · source file preserved · Ctrl+Z brings it back.";
     }
 
     private async void RefreshOutputs_Click(object sender, RoutedEventArgs e) => await RefreshOutputsAsync();
@@ -304,6 +448,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (closed) return;
             var document = Snapshot();
             liveMixer = new StreamingMixer(document, Tracks.Select(t => new LoadedTrack(t.Snapshot, t.Audio)).ToArray(), StereoMonitor);
+            // Play from the playhead; from the end it starts over.
+            playFrom = (long)Math.Round(playhead * liveMixer.SampleRate);
+            if (playFrom >= liveMixer.TotalFrames) { playFrom = 0; ShowPlayhead(0); }
+            if (playFrom > 0) liveMixer.Seek(playFrom);
             ResetMeters(); meterFrames = -1;
             var started = new Progress<PlaybackInfo>(info =>
             {
@@ -321,9 +469,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             await media.Completion;
             if (player != media || closed) return;
-            var report = liveMixer!.Meter.Report();
+            var finished = liveMixer!;
+            var report = finished.Meter.Report();
             RenderSummary = $"Last monitor · {Lufs(report.Integrated)} LUFS · LRA {report.Range:F1} LU · {Db(report.TruePeakDb)} dBTP · before monitor level";
-            StopPlayback(); Status = "Playback finished.";
+            StopPlayback(); Status = "Playback finished · playhead back where playback started.";
+            ShowPlayhead((double)playFrom / finished.SampleRate);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { if (player == media && !closed) { StopPlayback(); Error(ex); } }
@@ -399,6 +549,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private void StopPlayback()
     {
         var previous = player;
+        // Stopping leaves the playhead where playback was heard, so Space continues from there.
+        if (previous is not null && liveMixer is { SeekPending: false } mixer) ShowPlayhead(Audible(mixer, previous));
         player = null; liveMixer = null;
         if (previous is null) return;
         previous.Dispose();
@@ -413,13 +565,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (busy) { operation?.Cancel(); e.Cancel = true; Status = "Cancelling work · close again when finished."; return; }
         if (!ConfirmDiscard()) { e.Cancel = true; return; }
-        closed = true; meterTimer.Stop(); StopPlayback();
+        closed = true; meterTimer.Stop(); commitTimer.Stop(); StopPlayback();
     }
 
     private void ResetMeters() => Meters.SetChannels(liveMixer is { StereoMonitor: true }
         ? ["L", "R"] : SpatialMixer.Speakers(Layout).Select(s => s.Name).ToArray());
+    private static double Audible(StreamingMixer mixer, WasapiPlayback playback) => (double)Math.Max(0, mixer.Position - playback.QueuedFrames) / mixer.SampleRate;
     private void MeterTick(object? sender, EventArgs e)
     {
+        if (player is { } playback && liveMixer is { SeekPending: false } mixer) ShowPlayhead(Audible(mixer, playback));
         var reading = liveMixer?.Meter.Latest;
         if (reading is null || reading.Frames == meterFrames) { Meters.Show(null); return; }
         meterFrames = reading.Frames;
@@ -434,6 +588,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        // Text boxes keep their own Ctrl+Z for typing; everywhere else it undoes session edits.
+        var modifiers = Keyboard.Modifiers;
+        if ((e.Key == Key.Z || e.Key == Key.Y) && (modifiers == ModifierKeys.Control || modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+            && Keyboard.FocusedElement is not TextBoxBase)
+        {
+            e.Handled = true;
+            if (e.Key == Key.Y || modifiers.HasFlag(ModifierKeys.Shift)) Redo(); else Undo();
+            return;
+        }
         if (Keyboard.Modifiers == ModifierKeys.Control)
         {
             RoutedEventHandler? action = e.Key switch
@@ -460,6 +623,16 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 public sealed record LayoutOption(SpeakerLayout Layout, string Name) { public override string ToString() => Name; }
 public sealed record FormatOption(SampleFormat Format, string Name) { public override string ToString() => Name; }
 
+/// <summary>An undo snapshot: the session plus the media of each track, so a removed track can come back.</summary>
+public sealed record SessionState(SessionDocument Document, AudioBuffer[] Media);
+internal sealed record PendingEdit(SessionState State, string Label, string Key);
 
-
-
+internal sealed class SameState : IEqualityComparer<SessionState>
+{
+    public static readonly SameState Instance = new();
+    private static readonly List<TrackSettings> None = [];
+    // SessionDocument compares its track list by reference, so the tracks are compared item by item.
+    public bool Equals(SessionState? a, SessionState? b) => ReferenceEquals(a, b) || a is not null && b is not null
+        && a.Document with { Tracks = None } == b.Document with { Tracks = None } && a.Document.Tracks.SequenceEqual(b.Document.Tracks);
+    public int GetHashCode(SessionState state) => state.Document.Tracks.Count;
+}

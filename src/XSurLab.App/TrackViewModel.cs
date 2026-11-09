@@ -39,4 +39,12 @@ public sealed class TrackViewModel(TrackSettings settings, AudioBuffer audio) : 
     public bool Solo { get => settings.Solo; set { settings = settings with { Solo = value }; Changed(); } }
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
+
+    /// <summary>Puts back settings from undo or redo; an empty property name tells bindings that every property changed.</summary>
+    public void Restore(TrackSettings value)
+    {
+        if (value.Id != settings.Id || value.MediaPath != settings.MediaPath) throw new ArgumentException("Settings belong to another track.", nameof(value));
+        if (value == settings) return;
+        settings = value; Changed("");
+    }
 }

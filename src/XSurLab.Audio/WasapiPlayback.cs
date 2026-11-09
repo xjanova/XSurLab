@@ -14,7 +14,10 @@ public sealed class WasapiPlayback : IDisposable
     private readonly CancellationTokenSource cancellation = new();
     private double volume;
     private int disposed;
+    private long queued;
     public Task<PlaybackInfo> Completion { get; }
+    /// <summary>Frames read from the mixer but not yet heard; the audible frame is mixer.Position minus this.</summary>
+    public long QueuedFrames => Volatile.Read(ref queued);
     public double Volume
     {
         get => Volatile.Read(ref volume);
@@ -113,16 +116,25 @@ public sealed class WasapiPlayback : IDisposable
             var samples = new double[checked((int)capacity * mixer.Channels)];
             var floats = new float[samples.Length];
             var info = new PlaybackInfo(name, mixer.Channels, mixer.SampleRate, capacity * 1000d / mixer.SampleRate);
+            bool reported = false;
             while (true)
             {
                 token.ThrowIfCancellationRequested();
+                // A seek drops what is queued, so the new position is heard at once instead of after the buffer drains.
+                if (running && mixer.SeekPending)
+                {
+                    Native.Check(client.Stop()); running = false;
+                    Native.Check(client.Reset());
+                }
                 Native.Check(client.GetCurrentPadding(out var padding));
                 if (padding > capacity) throw new InvalidOperationException("Invalid WASAPI buffer padding.");
-                if (mixer.Position >= mixer.TotalFrames && padding == 0) break;
+                Volatile.Write(ref queued, padding);
+                if (mixer.Finished && padding == 0) break;
                 uint available = capacity - padding;
-                if (available > 0 && mixer.Position < mixer.TotalFrames)
+                int frames = available > 0 && !mixer.Finished ? mixer.Read(samples.AsSpan(0, (int)available * mixer.Channels), token) : 0;
+                // A seek to the very end reads nothing; GetBuffer is never asked for zero frames.
+                if (frames > 0)
                 {
-                    int frames = mixer.Read(samples.AsSpan(0, (int)available * mixer.Channels), token);
                     int count = frames * mixer.Channels;
                     double level = Volume;
                     for (int i = 0; i < count; i++)
@@ -136,9 +148,11 @@ public sealed class WasapiPlayback : IDisposable
                     try { Marshal.Copy(floats, 0, data, count); }
                     catch { render.ReleaseBuffer((uint)frames, 2); throw; }
                     Native.Check(render.ReleaseBuffer((uint)frames, 0));
+                    Volatile.Write(ref queued, padding + frames);
                     if (!running)
                     {
-                        Native.Check(client.Start()); running = true; started?.Report(info);
+                        Native.Check(client.Start()); running = true;
+                        if (!reported) { reported = true; started?.Report(info); }
                     }
                 }
                 if (token.WaitHandle.WaitOne(5)) token.ThrowIfCancellationRequested();

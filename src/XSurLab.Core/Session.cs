@@ -18,7 +18,7 @@ public sealed record TrackSettings
     public double Elevation { get; init; }
     /// <summary>Width in degrees of the arc the source is spread over, 0–360.</summary>
     public double Spread { get; init; }
-public TrackEq Eq { get; init; } = TrackEq.Flat;
+    public TrackEq Eq { get; init; } = TrackEq.Flat;
     public double LfeDb { get; init; } = -60;
     public double StartSeconds { get; init; }
     public bool Mute { get; init; }

@@ -11,12 +11,18 @@ public sealed class StreamingMixer
     private Parameters parameters, active;
     private double master, masterStep;
     private int rampLeft;
+    private long position, seekRequest = -1;
+    private double fade = 1, fadeStep;
     public int SampleRate => initial.SampleRate;
     public SpeakerLayout Layout => initial.Layout;
     public bool StereoMonitor { get; }
     public int Channels { get; }
     public long TotalFrames { get; }
-    public long Position { get; private set; }
+    /// <summary>Next frame Read produces. Safe to read from any thread.</summary>
+    public long Position => Volatile.Read(ref position);
+    /// <summary>A seek waits for the next Read; a player that queues audio should drop its queue when this is set.</summary>
+    public bool SeekPending => Volatile.Read(ref seekRequest) >= 0;
+    public bool Finished => Position >= TotalFrames && !SeekPending;
     public double Peak { get; private set; }
     /// <summary>Frames over which a live parameter change moves from the old to the new value.</summary>
     public int RampFrames { get; }
@@ -62,6 +68,14 @@ public sealed class StreamingMixer
         Volatile.Write(ref parameters, Prepare(session));
     }
 
+    /// <summary>Moves playback to a frame from any thread. The output fades in over RampFrames so the jump does not click.</summary>
+    public void Seek(long frame)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(frame);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(frame, TotalFrames);
+        Interlocked.Exchange(ref seekRequest, frame);
+    }
+
     private Parameters Prepare(SessionDocument session)
     {
         bool solo = session.Tracks.Any(t => t.Solo);
@@ -86,26 +100,34 @@ public sealed class StreamingMixer
     {
         if (destination.Length % Channels != 0) throw new ArgumentException("Buffer must contain whole audio frames.", nameof(destination));
         destination.Clear();
-        int frames = (int)Math.Min(destination.Length / Channels, TotalFrames - Position);
+        long seek = Interlocked.Exchange(ref seekRequest, -1), frame = position;
+        if (seek >= 0) { frame = seek; fade = 0; fadeStep = 1d / RampFrames; }
+        int frames = (int)Math.Min(destination.Length / Channels, TotalFrames - frame);
         var block = Volatile.Read(ref parameters);
         if (!ReferenceEquals(block, active)) Retarget(block);
-        for (int f = 0; f < frames; f++)
+        try
         {
-            if (f % 256 == 0) cancellationToken.ThrowIfCancellationRequested();
-            if (rampLeft > 0) Step();
-            Array.Clear(mix);
-            for (int i = 0; i < states.Length; i++) states[i].Add(Position, mix, lfeChannel);
-            if (StereoMonitor) SpatialMixer.FoldStereo(mix, Layout, stereo);
-            var output = StereoMonitor ? stereo : mix;
-            for (int c = 0; c < Channels; c++)
+            for (int f = 0; f < frames; f++)
             {
-                double value = output[c] * master;
-                if (!double.IsFinite(value)) throw new InvalidDataException("Mix contains non-finite samples.");
-                destination[f * Channels + c] = value;
-                Peak = Math.Max(Peak, Math.Abs(value));
+                if (f % 256 == 0) cancellationToken.ThrowIfCancellationRequested();
+                if (rampLeft > 0) Step();
+                if (fade < 1) fade = Math.Min(1, fade + fadeStep);
+                Array.Clear(mix);
+                for (int i = 0; i < states.Length; i++) states[i].Add(frame, mix, lfeChannel);
+                if (StereoMonitor) SpatialMixer.FoldStereo(mix, Layout, stereo);
+                var output = StereoMonitor ? stereo : mix;
+                double gain = master * fade;
+                for (int c = 0; c < Channels; c++)
+                {
+                    double value = output[c] * gain;
+                    if (!double.IsFinite(value)) throw new InvalidDataException("Mix contains non-finite samples.");
+                    destination[f * Channels + c] = value;
+                    Peak = Math.Max(Peak, Math.Abs(value));
+                }
+                frame++;
             }
-            Position++;
         }
+        finally { Volatile.Write(ref position, frame); }
         Meter.Process(destination[..(frames * Channels)]);
         return frames;
     }

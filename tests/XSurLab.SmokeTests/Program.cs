@@ -527,6 +527,43 @@ try
         var invalid = new StreamingMixer(session, [new(track, new AudioBuffer(48000, 1, [float.NaN]))]);
         Throws<InvalidDataException>(() => invalid.Read(new double[6]));
     });
+    Test("Seek jumps on the next read, fades in over 20 ms and reopens a finished stream", () =>
+    {
+        var audio = new AudioBuffer(48000, 1, Enumerable.Range(0, 20000).Select(i => (float)(.1 + i * 1e-5)).ToArray());
+        var track = Track("seek.wav"); var session = Session(SpeakerLayout.Surround51, track);
+        var reference = new StreamingMixer(session, [new(track, audio)]);
+        var all = new double[20000 * 6]; Equal(reference.Read(all), 20000);
+        var mixer = new StreamingMixer(session, [new(track, audio)]);
+        mixer.Read(new double[100 * 6]);
+        var thread = new Thread(() => mixer.Seek(12000)); thread.Start(); thread.Join();
+        Check(mixer.SeekPending, "A seek waits for the next read"); Equal(mixer.Position, 100L);
+        var after = new double[3000 * 6];
+        Equal(mixer.Read(after), 3000); Equal(mixer.Position, 15000L); Check(!mixer.SeekPending, "The read consumes the seek");
+        Check(after[2] > 0 && after[2] < all[12000 * 6 + 2] * .01, "The first frame after a seek starts near silence");
+        for (int f = 1; f < mixer.RampFrames; f++) Check(after[f * 6 + 2] >= after[(f - 1) * 6 + 2], "The fade-in must be monotonic");
+        for (int f = 2 * mixer.RampFrames; f < 3000; f++) Equal(after[f * 6 + 2], all[(12000 + f) * 6 + 2]);
+        mixer.Read(new double[20000 * 6]); Check(mixer.Finished, "Reading past the end finishes the stream");
+        mixer.Seek(0); Check(!mixer.Finished, "A pending seek reopens a finished stream");
+        Equal(mixer.Read(new double[6]), 1); Equal(mixer.Position, 1L);
+        Throws<ArgumentOutOfRangeException>(() => mixer.Seek(-1));
+        Throws<ArgumentOutOfRangeException>(() => mixer.Seek(mixer.TotalFrames + 1));
+        mixer.Seek(mixer.TotalFrames); Equal(mixer.Read(new double[6]), 0); Check(mixer.Finished, "A seek to the end reads nothing");
+    });
+    Test("Edit history undoes, redoes, drops the redo branch and keeps a bounded number of steps", () =>
+    {
+        var history = new EditHistory<string>("a", limit: 3);
+        Check(!history.CanUndo && !history.CanRedo, "A new history has nothing to undo or redo");
+        Check(!history.Record("a", "same"), "An unchanged state is not a step");
+        history.Record("b", "to b"); history.Record("c", "to c");
+        Equal(history.UndoLabel, "to c"); Equal(history.Undo(), "b");
+        Equal(history.RedoLabel, "to c"); Equal(history.Redo(), "c");
+        history.Undo(); history.Record("d", "to d");
+        Check(!history.CanRedo, "A new edit drops the redo branch"); Equal(history.Current, "d");
+        history.Record("e", "to e"); Equal(history.Count, 3);
+        history.Undo(); Equal(history.Undo(), "b"); Check(!history.CanUndo, "The oldest step falls off at the limit");
+        Throws<InvalidOperationException>(() => history.Undo());
+        history.Reset("z"); Equal(history.Current, "z"); Check(!history.CanUndo && !history.CanRedo, "Reset clears both directions");
+    });
     Test("K-weighting reproduces the BS.1770 48 kHz coefficients", () =>
     {
         var (b1, a1, b2, a2) = LoudnessMeter.KWeighting(48000);
