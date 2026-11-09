@@ -217,39 +217,61 @@ try
             }
         }
     });
-    Test("Live gain, master and pan apply on the next block without rewinding", () =>
+    Test("Live gain, master and pan ramp in on the next block without rewinding", () =>
     {
-        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 100).ToArray());
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.25f, 4000).ToArray());
         var track = Track("live.wav"); var session = Session(SpeakerLayout.Surround51, track);
         var mixer = new StreamingMixer(session, [new(track, audio)]);
         var block = new double[6]; mixer.Read(block); Near(block[2], .25);
         var changed = track with { Azimuth = 110, GainDb = -6 };
         mixer.Update(session with { MasterGainDb = -6, Tracks = [changed] });
         mixer.Read(block); Equal(mixer.Position, 2L);
+        Check(block[2] > .249 && block[5] < .001, "The first frame after a change must stay next to the old value");
+        var ramp = new double[mixer.RampFrames * 6]; mixer.Read(ramp);
+        for (int f = 1; f < mixer.RampFrames; f++)
+            Check(ramp[f * 6 + 2] <= ramp[(f - 1) * 6 + 2] && ramp[f * 6 + 5] >= ramp[(f - 1) * 6 + 5], "Ramp must be monotonic");
+        mixer.Read(block);
         Near(block[5], .25 * Math.Pow(10, -.6)); Near(block[2], 0);
+    });
+    Test("Mute fades over 20 ms instead of stepping", () =>
+    {
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.5f, 6000).ToArray());
+        var track = Track("fade.wav"); var session = Session(SpeakerLayout.Surround51, track);
+        var mixer = new StreamingMixer(session, [new(track, audio)]);
+        Equal(mixer.RampFrames, 960);
+        var output = new double[3000 * 6];
+        mixer.Read(output.AsSpan(0, 1000 * 6));
+        mixer.Update(session with { Tracks = [track with { Mute = true }] });
+        mixer.Read(output.AsSpan(1000 * 6));
+        double largest = 0;
+        for (int f = 1; f < 3000; f++) largest = Math.Max(largest, Math.Abs(output[f * 6 + 2] - output[(f - 1) * 6 + 2]));
+        Check(largest <= .5 / 960 * 1.0001, $"Largest step {largest} must be one ramp increment");
+        Near(output[1000 * 6 + 2], .5 * 959 / 960); Equal(output[2999 * 6 + 2], 0d);
     });
     Test("Live mute and solo can silence and restore all tracks without stopping", () =>
     {
-        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.1f, 20).ToArray());
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.1f, 8000).ToArray());
         var a = Track("a.wav") with { Azimuth = -30 }; var b = Track("b.wav") with { Azimuth = 30 };
         var session = Session(SpeakerLayout.Surround51, a, b);
         var mixer = new StreamingMixer(session, [new(a, audio), new(b, audio)]);
-        var block = new double[6]; mixer.Read(block); Near(block[0], .1); Near(block[1], .1);
+        var block = new double[6]; var ramp = new double[mixer.RampFrames * 6];
+        mixer.Read(block); Near(block[0], .1); Near(block[1], .1);
         mixer.Update(session with { Tracks = [a with { Mute = true, Solo = true }, b] });
-        mixer.Read(block); Check(block.All(x => x == 0), "A muted solo track must suppress the other tracks");
+        mixer.Read(ramp); mixer.Read(block); Check(block.All(x => x == 0), "A muted solo track must suppress the other tracks");
         mixer.Update(session with { Tracks = [a, b with { Solo = true }] });
-        mixer.Read(block); Near(block[0], 0); Near(block[1], .1);
-        mixer.Update(session); mixer.Read(block); Near(block[0], .1); Near(block[1], .1);
+        mixer.Read(ramp); mixer.Read(block); Near(block[0], 0); Near(block[1], .1);
+        mixer.Update(session); mixer.Read(ramp); mixer.Read(block); Near(block[0], .1); Near(block[1], .1);
     });
     Test("Enabling LFE live uses continuous low-pass history", () =>
     {
-        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.1f, 200).ToArray());
+        var audio = new AudioBuffer(48000, 1, Enumerable.Repeat(.1f, 4000).ToArray());
         var off = Track("bass.wav"); var on = off with { LfeDb = 0 };
         var a = new StreamingMixer(Session(SpeakerLayout.Surround51, off), [new(off, audio)]);
         var b = new StreamingMixer(Session(SpeakerLayout.Surround51, on), [new(on, audio)]);
         a.Read(new double[100 * 6]); b.Read(new double[100 * 6]);
         a.Update(Session(SpeakerLayout.Surround51, on));
-        var x = new double[6]; var y = new double[6]; a.Read(x); b.Read(y); Near(x[3], y[3]);
+        a.Read(new double[a.RampFrames * 6]); b.Read(new double[b.RampFrames * 6]);
+        var x = new double[6]; var y = new double[6]; a.Read(x); b.Read(y); Equal(x[3], y[3]);
     });
     Test("Streaming rejects structural changes atomically and handles final partial blocks", () =>
     {
