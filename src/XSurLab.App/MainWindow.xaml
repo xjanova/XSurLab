@@ -166,14 +166,20 @@
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <Grid Grid.ColumnSpan="3" Margin="0,0,0,12" IsEnabled="{Binding CanEdit}">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
           <StackPanel Margin="0,0,12,0">
-            <TextBlock Text="WASAPI / SHARED OUTPUT" Style="{StaticResource Label}"/>
-            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedOutput}" AutomationProperties.Name="Monitor output device"/>
+            <TextBlock Text="WASAPI OUTPUT" Style="{StaticResource Label}"/>
+            <ComboBox ItemsSource="{Binding OutputDevices}" SelectedItem="{Binding SelectedOutput}" AutomationProperties.Name="Monitor output device"
+                      ToolTip="Follows devices as they are plugged in, removed or reconfigured in Windows"/>
           </StackPanel>
-          <Button Grid.Column="1" Content="Refresh outputs" Click="RefreshOutputs_Click" VerticalAlignment="Bottom"/>
-          <CheckBox Grid.Column="2" Content="Stereo fold-down" IsChecked="{Binding StereoMonitor}" VerticalAlignment="Bottom" Margin="12,0,18,8" ToolTip="Clear to send the session's discrete channels. The device must have the matching Windows speaker layout."/>
-          <StackPanel Grid.Column="3">
+          <StackPanel Grid.Column="1" Margin="0,0,12,0">
+            <TextBlock Text="MODE" Style="{StaticResource Label}"/>
+            <ComboBox ItemsSource="{Binding OutputModes}" SelectedValue="{Binding OutputMode}" SelectedValuePath="Mode" Width="112" AutomationProperties.Name="Monitor output mode"
+                      ToolTip="Shared: through the Windows mixer, volume and effects. Exclusive: the session's samples go to the driver unchanged at the session rate; Windows volume does not apply and other apps are silent while it plays."/>
+          </StackPanel>
+          <Button Grid.Column="2" Content="Refresh outputs" Click="RefreshOutputs_Click" VerticalAlignment="Bottom"/>
+          <CheckBox Grid.Column="3" Content="Stereo fold-down" IsChecked="{Binding StereoMonitor}" VerticalAlignment="Bottom" Margin="12,0,18,8" ToolTip="Clear to send the session's discrete channels. Shared needs the matching Windows speaker layout; Exclusive needs a driver that accepts it."/>
+          <StackPanel Grid.Column="4">
             <TextBlock Text="{Binding MonitorVolume, StringFormat='MONITOR / {0:P0}'}" Style="{StaticResource Label}"/>
             <Slider Value="{Binding MonitorVolume}" Minimum="0" Maximum="1" AutomationProperties.Name="Monitor volume"/>
           </StackPanel>

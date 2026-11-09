@@ -29,7 +29,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private StreamingMixer? liveMixer;
     private AudioDevice? selectedOutput;
     private bool stereoMonitor = true, closed;
+    private OutputMode outputMode = OutputMode.Shared;
     private double monitorVolume = .5;
+    // Windows reports one plug or unplug as a burst of notifications; the list is enumerated once the burst settles.
+    private DeviceWatcher? watcher;
+    private readonly DispatcherTimer deviceTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    private bool syncingOutputs, outputSyncRunning, outputSyncAgain, outputSyncManual;
     private Task playbackStopped = Task.CompletedTask;
     private CancellationTokenSource? operation;
     private readonly DispatcherTimer meterTimer = new() { Interval = TimeSpan.FromMilliseconds(50) };
@@ -81,7 +86,20 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool CanEdit => !busy;
     public bool CanRender => !busy && Tracks.Count > 0;
     public bool CanPlay => CanRender && SelectedOutput is not null;
-    public AudioDevice? SelectedOutput { get => selectedOutput; set { if (selectedOutput == value) return; StopPlayback(); selectedOutput = value; Changed(); Changed(nameof(CanPlay)); } }
+    // While the device list updates itself, the selection is put back afterwards and playback continues if its output is still there.
+    public AudioDevice? SelectedOutput { get => selectedOutput; set { if (selectedOutput == value) return; if (!syncingOutputs) StopPlayback(); selectedOutput = value; Changed(); Changed(nameof(CanPlay)); } }
+    public ModeOption[] OutputModes { get; } = [new(OutputMode.Shared, "Shared"), new(OutputMode.Exclusive, "Exclusive")];
+    public OutputMode OutputMode
+    {
+        get => outputMode;
+        set
+        {
+            if (outputMode == value) return;
+            StopPlayback(); outputMode = value; Changed();
+            Status = value == OutputMode.Exclusive ? "Exclusive · Windows volume and effects do not apply · set MONITOR before you play."
+                : "Shared · through the Windows mixer, volume and effects.";
+        }
+    }
     public bool StereoMonitor { get => stereoMonitor; set { if (stereoMonitor == value) return; StopPlayback(); stereoMonitor = value; Changed(); ResetMeters(); } }
     public double MonitorVolume { get => monitorVolume; set { monitorVolume = Math.Clamp(value, 0, 1); if (player is not null) player.Volume = monitorVolume; Changed(); } }
     public bool CanEditSelected => !busy && Selected is not null;
@@ -127,10 +145,18 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         InitializeComponent();
         DataContext = this;
         meterTimer.Tick += MeterTick;
+        deviceTimer.Tick += async (_, _) => { deviceTimer.Stop(); await SyncOutputsAsync(manual: false); };
         Loaded += async (_, _) =>
         {
             ResetMeters(); meterTimer.Start();
-            await RefreshOutputsAsync();
+            // Watching starts before the first enumeration so a device plugged in meanwhile is not missed.
+            try
+            {
+                watcher = new DeviceWatcher();
+                watcher.Changed += (_, _) => Dispatcher.InvokeAsync(ScheduleOutputSync);
+            }
+            catch (Exception ex) { watcher = null; Status = "The output list will not follow devices by itself · use Refresh outputs · " + ex.Message; }
+            await SyncOutputsAsync(manual: true);
             await OpenFilesAsync(Environment.GetCommandLineArgs().Skip(1).ToArray());
         };
         AllowDrop = true;
@@ -419,23 +445,66 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Status = "Track removed · source file preserved · Ctrl+Z brings it back.";
     }
 
-    private async void RefreshOutputs_Click(object sender, RoutedEventArgs e) => await RefreshOutputsAsync();
-    private async Task RefreshOutputsAsync()
+    private async void RefreshOutputs_Click(object sender, RoutedEventArgs e) => await SyncOutputsAsync(manual: true);
+    private void ScheduleOutputSync()
     {
-        StopPlayback(); SetBusy(true);
+        if (closed) return;
+        deviceTimer.Stop(); deviceTimer.Start();
+    }
+    // One enumeration at a time; a request that arrives meanwhile runs once more afterwards.
+    private async Task SyncOutputsAsync(bool manual)
+    {
+        outputSyncManual |= manual;
+        if (outputSyncRunning) { outputSyncAgain = true; return; }
+        outputSyncRunning = true;
         try
         {
-            var previous = SelectedOutput?.Id;
-            var devices = await WasapiPlayback.EnumerateAsync();
-            if (closed) return;
-            OutputDevices.Clear();
-            foreach (var device in devices) OutputDevices.Add(device);
-            SelectedOutput = OutputDevices.FirstOrDefault(d => d.Id == previous) ?? OutputDevices.FirstOrDefault();
-            Status = devices.Count == 0 ? "No active output devices · connect a device, then refresh outputs."
-                : $"{devices.Count} WASAPI output(s) · stereo fold-down enabled by default.";
+            do
+            {
+                outputSyncAgain = false;
+                bool announce = outputSyncManual;
+                outputSyncManual = false;
+                IReadOnlyList<AudioDevice> devices;
+                try { devices = await WasapiPlayback.EnumerateAsync(); }
+                catch (Exception ex) { if (!closed) Status = "Cannot enumerate WASAPI outputs: " + ex.Message; return; }
+                if (closed) return;
+                ApplyOutputs(devices, announce);
+            }
+            while (outputSyncAgain && !closed);
         }
-        catch (Exception ex) { if (!closed) { SelectedOutput = null; Status = "Cannot enumerate WASAPI outputs: " + ex.Message; } }
-        finally { if (!closed) SetBusy(false); }
+        finally { outputSyncRunning = false; }
+    }
+    private void ApplyOutputs(IReadOnlyList<AudioDevice> devices, bool announce)
+    {
+        var previous = SelectedOutput;
+        var before = OutputDevices.ToArray();
+        syncingOutputs = true;
+        try
+        {
+            DeviceList.Sync(OutputDevices, devices);
+            SelectedOutput = OutputDevices.FirstOrDefault(d => d.Id == previous?.Id) ?? OutputDevices.FirstOrDefault();
+        }
+        finally { syncingOutputs = false; }
+        var now = SelectedOutput;
+        if (previous is not null && now?.Id != previous.Id)
+        {
+            // The output in use is gone. Nothing starts playing on the replacement by itself.
+            bool stopped = player is not null;
+            StopPlayback();
+            Status = $"Output removed · {previous.Name}{(stopped ? " · playback stopped" : "")}{(now is null ? " · no output left" : $" · now {now.Name}")}";
+            return;
+        }
+        if (announce)
+        {
+            Status = devices.Count == 0 ? "No active output devices · connect one and the list updates by itself."
+                : $"{devices.Count} WASAPI output(s) · the list follows devices as they are plugged in or removed.";
+            return;
+        }
+        var added = devices.Where(d => before.All(b => b.Id != d.Id)).Select(d => d.Name).ToArray();
+        var removed = before.Where(b => devices.All(d => d.Id != b.Id)).Select(b => b.Name).ToArray();
+        if (added.Length > 0) Status = "Output added · " + string.Join(", ", added);
+        else if (removed.Length > 0) Status = "Output removed · " + string.Join(", ", removed);
+        else if (now is not null && previous is not null && now != previous) Status = "Output format changed · " + now.DisplayName;
     }
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
@@ -446,6 +515,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         {
             await playbackStopped;
             if (closed) return;
+            // The output may have been unplugged while the previous stream was releasing.
+            if (SelectedOutput is not { } output) { Status = "Choose an output first."; return; }
             var document = Snapshot();
             liveMixer = new StreamingMixer(document, Tracks.Select(t => new LoadedTrack(t.Snapshot, t.Audio)).ToArray(), StereoMonitor);
             // Play from the playhead; from the end it starts over.
@@ -456,9 +527,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             var started = new Progress<PlaybackInfo>(info =>
             {
                 if (player != media || closed) return;
-                Status = $"Playing {(StereoMonitor ? "stereo fold-down" : "session channels")} · {info.DeviceName} · {info.Channels} ch / {info.SampleRate / 1000d:0.#} kHz · {info.BufferMilliseconds:F0} ms buffer";
+                Status = $"Playing {(StereoMonitor ? "stereo fold-down" : "session channels")} · {info.Mode} {info.Format} · {info.DeviceName} · "
+                    + $"{info.Channels} ch / {info.SampleRate / 1000d:0.#} kHz · {info.BufferMilliseconds:F0} ms {(info.Mode == OutputMode.Exclusive ? "period" : "buffer")}";
             });
-            media = new WasapiPlayback(liveMixer, SelectedOutput!.Id, MonitorVolume, started);
+            media = new WasapiPlayback(liveMixer, output.Id, MonitorVolume, started, OutputMode);
             player = media;
             Status = "Opening WASAPI monitor…";
         }
@@ -476,6 +548,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             ShowPlayhead((double)playFrom / finished.SampleRate);
         }
         catch (OperationCanceledException) { }
+        // An unplugged output is expected, not an error box: say so and let the list catch up.
+        catch (AudioDeviceLostException ex) { if (player == media && !closed) { StopPlayback(); Status = ex.Message; ScheduleOutputSync(); } }
         catch (Exception ex) { if (player == media && !closed) { StopPlayback(); Error(ex); } }
     }
     private async void Export_Click(object sender, RoutedEventArgs e)
@@ -565,7 +639,8 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         if (busy) { operation?.Cancel(); e.Cancel = true; Status = "Cancelling work · close again when finished."; return; }
         if (!ConfirmDiscard()) { e.Cancel = true; return; }
-        closed = true; meterTimer.Stop(); commitTimer.Stop(); StopPlayback();
+        closed = true; meterTimer.Stop(); commitTimer.Stop(); deviceTimer.Stop(); StopPlayback();
+        watcher?.Dispose(); watcher = null;
     }
 
     private void ResetMeters() => Meters.SetChannels(liveMixer is { StereoMonitor: true }
@@ -622,6 +697,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
 // ToString is what screen readers announce for combo-box items.
 public sealed record LayoutOption(SpeakerLayout Layout, string Name) { public override string ToString() => Name; }
 public sealed record FormatOption(SampleFormat Format, string Name) { public override string ToString() => Name; }
+public sealed record ModeOption(OutputMode Mode, string Name) { public override string ToString() => Name; }
 
 /// <summary>An undo snapshot: the session plus the media of each track, so a removed track can come back.</summary>
 public sealed record SessionState(SessionDocument Document, AudioBuffer[] Media);

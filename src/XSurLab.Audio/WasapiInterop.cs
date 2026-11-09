@@ -9,7 +9,24 @@ internal static class Native
     [DllImport("ole32.dll")] internal static extern int CoInitializeEx(IntPtr reserved, uint mode);
     [DllImport("ole32.dll")] internal static extern void CoUninitialize();
     [DllImport("ole32.dll")] internal static extern int PropVariantClear(ref PropVariant value);
+    // MMCSS "Pro Audio" raises the audio thread's scheduling class; failure only costs robustness, not correctness.
+    [DllImport("avrt.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr AvSetMmThreadCharacteristicsW(string task, ref uint index);
+    [DllImport("avrt.dll")] internal static extern bool AvRevertMmThreadCharacteristics(IntPtr handle);
 }
+
+internal static class AudioError
+{
+    internal const int UnsupportedFormat = unchecked((int)0x88890008);
+    internal const int DeviceInvalidated = unchecked((int)0x88890004);
+    internal const int DeviceInUse = unchecked((int)0x8889000A);
+    internal const int ExclusiveNotAllowed = unchecked((int)0x8889000E);
+    internal const int ServiceNotRunning = unchecked((int)0x88890010);
+    internal const int BufferSizeNotAligned = unchecked((int)0x88890019);
+    internal const int ResourcesInvalidated = unchecked((int)0x88890026);
+}
+
+/// <summary>Sample layouts tried for exclusive mode, in order of preference; shared mode always uses Float32.</summary>
+internal enum EndpointEncoding { Float32, Int24In32, Int32, Int24, Int16 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 2)]
 internal struct WaveFormat
@@ -19,12 +36,18 @@ internal struct WaveFormat
     public ushort BlockAlign, Bits, Extra, ValidBits;
     public uint Mask;
     public Guid SubFormat;
-    public static WaveFormat Float(int channels, int rate, uint mask) => new()
+    public static WaveFormat Float(int channels, int rate, uint mask) => Create(EndpointEncoding.Float32, channels, rate, mask);
+    public static WaveFormat Create(EndpointEncoding encoding, int channels, int rate, uint mask)
     {
-        Tag = 0xfffe, Channels = (ushort)channels, Rate = rate, BytesPerSecond = rate * channels * 4,
-        BlockAlign = (ushort)(channels * 4), Bits = 32, Extra = 22, ValidBits = 32, Mask = mask,
-        SubFormat = new Guid("00000003-0000-0010-8000-00aa00389b71")
-    };
+        int container = Sample.Bytes(encoding);
+        return new()
+        {
+            Tag = 0xfffe, Channels = (ushort)channels, Rate = rate, BytesPerSecond = rate * channels * container,
+            BlockAlign = (ushort)(channels * container), Bits = (ushort)(container * 8), Extra = 22,
+            ValidBits = (ushort)(encoding is EndpointEncoding.Int24In32 ? 24 : container * 8), Mask = mask,
+            SubFormat = new Guid(encoding == EndpointEncoding.Float32 ? "00000003-0000-0010-8000-00aa00389b71" : "00000001-0000-0010-8000-00aa00389b71")
+        };
+    }
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -44,8 +67,18 @@ internal interface IDeviceEnumerator
     [PreserveSig] int EnumAudioEndpoints(int flow, uint stateMask, out IDeviceCollection devices);
     [PreserveSig] int GetDefaultAudioEndpoint(int flow, int role, out IDevice device);
     [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IDevice device);
-    [PreserveSig] int RegisterEndpointNotificationCallback(IntPtr callback);
-    [PreserveSig] int UnregisterEndpointNotificationCallback(IntPtr callback);
+    [PreserveSig] int RegisterEndpointNotificationCallback(IMMNotificationClient callback);
+    [PreserveSig] int UnregisterEndpointNotificationCallback(IMMNotificationClient callback);
+}
+// Windows calls these on its own notification thread. They must return quickly and never call back into the enumerator.
+[ComImport, Guid("7991EEC9-7E89-4D85-8390-6C703CEC60C0"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IMMNotificationClient
+{
+    [PreserveSig] int OnDeviceStateChanged([MarshalAs(UnmanagedType.LPWStr)] string id, uint state);
+    [PreserveSig] int OnDeviceAdded([MarshalAs(UnmanagedType.LPWStr)] string id);
+    [PreserveSig] int OnDeviceRemoved([MarshalAs(UnmanagedType.LPWStr)] string id);
+    [PreserveSig] int OnDefaultDeviceChanged(int flow, int role, [MarshalAs(UnmanagedType.LPWStr)] string? id);
+    [PreserveSig] int OnPropertyValueChanged([MarshalAs(UnmanagedType.LPWStr)] string id, PropertyKey key);
 }
 [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
 internal interface IDeviceCollection

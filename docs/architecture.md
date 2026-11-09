@@ -1,7 +1,7 @@
 ﻿# XSurLab 0.2 architecture
 
 - **XSurLab.Core**: WAV decoder, validated JSON sessions, speaker maps, panner, stateful streaming mixer and offline renderer.
-- **XSurLab.Audio**: native WASAPI shared-mode output, endpoint enumeration and strict discrete layout checks; no NuGet audio dependency.
+- **XSurLab.Audio**: native event-driven WASAPI output (shared and exclusive), endpoint enumeration and change notifications, strict discrete layout checks; no NuGet audio dependency.
 - **XSurLab.App**: native WPF UI, real waveform, source panner, file dialogs and live monitor controls.
 - **XSurLab.SmokeTests**: deterministic signal/file/stream checks without an external test framework.
 - **XSurLab.AudioChecks**: routing contract checks and optional silent hardware playback/cancellation diagnostics.
@@ -23,23 +23,46 @@ publishes immutable parameter blocks. Gain, pan, LFE, mute/solo and master chang
 the next block. All tracks keep filter history even while muted or with LFE disabled. No parameter
 smoothing is implemented, so abrupt edits may click. Structural edits stop playback.
 
-WASAPI runs on a dedicated STA thread with balanced COM initialization and releases. It requests a
-50 ms shared buffer, queries actual capacity/padding, writes float32 interleaved samples, and drains
-queued samples before finishing. Cancellation stops and releases the endpoint. No temporary preview
-WAV is written. New playback waits for the preceding stream to release its resources. Device removal
-or Windows format changes stop with an error; Refresh outputs enumerates active endpoints again.
+WASAPI runs on a dedicated STA thread with balanced COM initialization and releases, registered with
+MMCSS as "Pro Audio". Both modes are event-driven: the endpoint signals once per device period and the
+thread fills what it asks for. Two seconds without a signal while running stops playback as a lost device.
 
-Discrete surround requires the endpoint mix format to have the exact channel count AND channel mask.
-`IsFormatSupported` must return S_OK for the session rate/float format; closest matches are rejected.
-This avoids accepting a surround-to-stereo APO as discrete output. Stereo fold-down is explicit and
-may use any endpoint that accepts stereo. Windows/APOs can still process shared-mode audio; physical
-speaker wiring and calibration require hardware checks. Default output is selected only on enumeration,
-not followed automatically during playback. Output selection, fold-down and monitor gain are not saved.
+- **Shared** requests a 50 ms buffer in float32, tops up `capacity − padding` frames on each signal
+  and drains queued samples before finishing. Audio passes through the Windows mixer, volume and APOs.
+- **Exclusive** asks the driver for the exact WAVEFORMATEXTENSIBLE (channel count, channel mask and
+  session rate), trying float32, PCM 24-in-32, PCM 32, PCM 24 and PCM 16 in that order. It uses the
+  device's default period, re-initializes with a frame-aligned period when the driver asks
+  (`AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED`), writes one whole period per signal and plays one silent period
+  after the last audio before stopping. Nothing resamples, mixes or changes the level on the way, so
+  Windows volume does not apply, and other apps are silent while it plays. Integer formats are
+  rounded to the nearest code without dither (export keeps its own TPDF dither).
 
-Monitor gain starts at 50%, is separate from master/export, and is applied just before float conversion.
+A seek stops and resets the stream so the jump is heard at once. Cancellation stops and releases the
+endpoint. No temporary preview WAV is written. New playback waits for the preceding stream to release
+its resources. Exclusive mode switched off in Windows, an endpoint held by another exclusive app, and a
+removed device each end with their own message; a removed device (`AUDCLNT_E_DEVICE_INVALIDATED`) is
+reported on the status line rather than in a dialog.
+
+`DeviceWatcher` registers an `IMMNotificationClient` for endpoints being added, removed, enabled or
+disabled, made the multimedia default, or given a new engine format or name. Callbacks arrive on a
+Windows thread and only post to the UI dispatcher; after 400 ms without another notification the
+outputs are enumerated again and the list is updated in place (`DeviceList.Sync`). Entries that did not
+change keep their instance, so the selection and a running stream survive unrelated changes. When the
+selected output disappears, playback stops and the first (default) output is selected but not started.
+
+Discrete surround in shared mode requires the endpoint mix format to have the exact channel count AND
+channel mask. `IsFormatSupported` must return S_OK for the session rate/float format; closest matches are
+rejected. This avoids accepting a surround-to-stereo APO as discrete output. In exclusive mode the driver
+decides: it may accept a layout the Windows speaker setup does not show (for example 7.1 on an endpoint
+configured as 5.1), and the channels then go to the driver's outputs as WAVE order says. Stereo fold-down
+is explicit and may use any endpoint that accepts stereo. Physical speaker wiring and calibration require
+hardware checks. Output selection, output mode, fold-down and monitor gain are not saved.
+
+Monitor gain starts at 50%, is separate from master/export, and is applied just before sample conversion.
 A block above full scale after monitor gain stops playback before that block is submitted. Export still
-rejects clipping in the complete mix. Neither path is a limiter or a true-peak meter. Polling is every
-5 ms; reported buffer duration is not round-trip latency or a low-latency guarantee.
+rejects clipping in the complete mix. Neither path is a limiter or a true-peak meter. The reported buffer
+(shared) or period (exclusive) is not round-trip latency or a low-latency guarantee; the playhead
+estimate is within one period in exclusive mode.
 
 WASAPI references: [Rendering a Stream](https://learn.microsoft.com/en-us/windows/win32/coreaudio/rendering-a-stream),
 [IsFormatSupported](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-isformatsupported).
