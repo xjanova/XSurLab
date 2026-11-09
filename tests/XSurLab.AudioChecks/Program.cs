@@ -176,6 +176,29 @@ if (args.Contains("--devices"))
                     try { await playback.Completion.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Cancellation did not stop playback."); }
                     catch (TaskCanceledException) { Console.WriteLine($"PASS WASAPI {mode} cancellation/release."); }
                 });
+                await Hardware(mode, $"{mode} calibrated", async () =>
+                {
+                    // A 50 ms delay on L plays out after the mix ends: Finished only turns true once that tail has been read.
+                    var mixer = Silent(SpeakerLayout.Stereo, device.SampleRate, device.SampleRate / 10);
+                    var chain = new MonitorChain(mixer, SpeakerLayout.Stereo, SpeakerCalibration.Flat(SpeakerLayout.Stereo) with
+                    {
+                        Speakers = [new("L", -3, SpeakerCalibration.MaxDelayMs), new("R")]
+                    });
+                    using (var playback = new WasapiPlayback(chain, device.Id, mode: mode))
+                    {
+                        await playback.Completion.WaitAsync(TimeSpan.FromSeconds(10));
+                        if (mixer.Position != mixer.TotalFrames || !chain.Finished) throw new Exception("Calibrated playback did not play out its delay.");
+                    }
+                    // The test signal never ends by itself; with no speaker chosen it is silent and stops when cancelled.
+                    var noise = new TestSignal(device.SampleRate, SpeakerLayout.Stereo);
+                    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    using var test = new WasapiPlayback(new MonitorChain(noise, SpeakerLayout.Stereo, bypassBassManagement: true), device.Id,
+                        started: new Started(_ => started.TrySetResult()), mode: mode);
+                    await Task.WhenAny(started.Task, test.Completion).WaitAsync(TimeSpan.FromSeconds(10));
+                    test.Dispose();
+                    try { await test.Completion.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("The test signal did not stop when cancelled."); }
+                    catch (TaskCanceledException) { Console.WriteLine($"PASS WASAPI {mode} calibrated drain and silent test signal."); }
+                });
             }
         }
         if (devices.Count == 0) Console.WriteLine("GAP No audio endpoint: hardware playback not checked.");

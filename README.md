@@ -48,6 +48,17 @@ dotnet run --project src/XSurLab.App
 - Stereo fold-down (Lo/Ro) สำหรับฟังเทียบ หรือปิดเพื่อส่งช่อง discrete
 - Meter แยกช่องพร้อม peak hold, LUFS momentary/short-term/integrated และ true peak สด
 
+**ปรับเทียบลำโพง (Calibrate…)**
+- ค่าแยกตามอุปกรณ์และ layout (stereo fold-down มีค่าของตัวเอง) เก็บใน `%APPDATA%\XSurLab\calibration.json`; ไฟล์ก่อนหน้าเก็บไว้เป็น `.bak`
+  และไฟล์ที่อ่านไม่ได้จะถูกคัดลอกเป็น `calibration.json.unreadable-<เวลา>` ก่อนบันทึกทับครั้งแรก
+- เสียงทดสอบ pink noise −20 dBFS RMS ทีละลำโพง: ลำโพงหลัก 500 Hz–2 kHz, sub 20–120 Hz, peak ไม่เกิน −8 dBFS;
+  กด Test ทีละตัว หรือ Cycle ไล่ตามเข็มนาฬิกาตัวละ 3 วินาที (sub ท้ายสุด) แล้ววัดด้วย SPL meter ที่จุดนั่งฟัง
+- Trim −20…+10 dB และ delay 0–50 ms ต่อลำโพง ปรับระหว่างเสียงทดสอบดังอยู่ได้; ใส่ระยะห่าง (เมตร) แล้วให้คำนวณ delay ได้
+- Bass management: crossover Linkwitz–Riley 24 dB/oct ที่ 60/80/100/120 Hz ส่งเสียงทุ้มของลำโพงหลักไป sub รวมกับ LFE (+10 dB เลือกได้)
+- ระดับ sub: เปิด bass management และ LFE +10 dB → ตั้ง sub ให้อ่านได้เท่าลำโพงหลัก; ปิด bass management → ตั้ง sub ให้ดังกว่าลำโพงหลัก 10 dB
+  (มิกซ์คาดว่า LFE ดังกว่า 10 dB ในย่านของมัน)
+- ใช้กับเสียงฟังเท่านั้น ไม่เข้า export/deliver; สวิตช์ **Apply** สลับ calibrate/flat ระหว่างเล่นได้ (ไล่ค่าใน 20 ms)
+
 **ส่งออกและส่งมอบ**
 - Export WAV แบบ PCM 24/16-bit (TPDF dither) หรือ float 32-bit พร้อม BWF `bext` ที่บันทึกค่า loudness
 - ไฟล์เกิน 4 GiB เขียนเป็น RF64 อัตโนมัติ
@@ -64,7 +75,8 @@ dotnet run --project src/XSurLab.App
 1. **+ Import WAV** (หรือลากไฟล์มาวาง) → เลือก **Speaker layout** และ **Sample rate**
 2. เลือกแทร็ก → ลากในวงกลม panner, ปรับ gain/EQ ใน Channel strip และแท็บ Track EQ
 3. เลือกอุปกรณ์ใน **WASAPI OUTPUT** และ **MODE** → **▶ Play monitor** (หรือกด Space)
-4. **Export WAV →** สำหรับไฟล์เดียว หรือ **Deliver…** สำหรับชุดส่งมอบพร้อมรายงาน QC
+4. ครั้งแรกกับลำโพงชุดใหม่: **Calibrate…** → ตั้ง MONITOR ให้เบาก่อน → Test ทีละลำโพง → ปรับ trim/delay → **Save calibration**
+5. **Export WAV →** สำหรับไฟล์เดียว หรือ **Deliver…** สำหรับชุดส่งมอบพร้อมรายงาน QC
 
 Master เริ่มที่ −6 dB เพื่อเผื่อ headroom. Monitor เริ่มที่ 50% และแยกจาก master/export.
 ใน Exclusive ระดับเสียง Windows ไม่ช่วยลดเสียง — ตั้ง MONITOR ก่อนกดเล่น.
@@ -97,7 +109,7 @@ CI บน Windows รัน build, Verify.ps1 และแพ็ก exe; กา�
 ## ขอบเขต
 
 ยังไม่มี: ASIO, การอัด/จับเสียงระบบ, automation, การตัด/แบ่ง clip, dynamics (compressor/limiter),
-bass management, binaural/HRTF, object audio, DTS encoding หรือ DTS:X authoring.
+การวัดห้องด้วยไมค์/room EQ, binaural/HRTF, object audio, DTS encoding หรือ DTS:X authoring.
 Workspace Routing / Up-Downmix / Monitor ในต้นแบบยังเป็นแนวคิด — ต้นแบบ 8 หน้าอยู่ที่
 [design/xsurlab-studio.html](design/xsurlab-studio.html).
 
@@ -110,7 +122,12 @@ Workspace Routing / Up-Downmix / Monitor ในต้นแบบยังเป
 - Buffer/period ที่แสดงไม่ใช่ round-trip latency; ยังไม่รับรองงาน low-latency
 - Monitor หยุดเมื่อค่าหลัง monitor gain เกิน 0 dBFS; ไม่มี limiter หรือ normalization อัตโนมัติ
 - Stereo fold-down เป็น Lo/Ro เพื่อฟังเทียบ: C, surround และเพดานลงข้างที่เกี่ยวข้องที่ −3 dB และไม่รวม LFE
-- Panner เป็น amplitude panner ไม่จำลองระยะทาง ห้อง หรือ HRTF; ต้องตรวจการต่อสายและ calibrate ลำโพงจริงเอง
+- Panner เป็น amplitude panner ไม่จำลองระยะทาง ห้อง หรือ HRTF
+- Calibrate ไม่ได้ฟังเสียงจากไมค์เอง: ระดับเสียงต้องอ่านจาก SPL meter และระยะต้องวัดเอง; Shared ผ่านเอฟเฟกต์ของ Windows
+  จึงควรปิด room correction/virtual surround ระหว่าง calibrate
+- Bass management ตัดเสียงทุ้มของลำโพงหลักทุกตัว (ยังไม่มีตัวเลือก large/small ต่อลำโพง) และไม่ low-pass ช่อง LFE ซ้ำ;
+  trim บวก หรือ LFE +10 dB อาจทำให้ monitor เกิน 0 dBFS แล้วหยุดเล่น — ลด MONITOR ลง
+- เมื่อเพลงจบ ลำโพงที่ตั้ง delay จะเล่นต่อจนครบ delay; playhead ไม่นับ delay (ไม่เกิน 50 ms)
 - รายงาน QC เทียบเป้าที่เลือก ไม่ใช่การรับรอง DTS หรือมาตรฐานส่งมอบภาพยนตร์
 
 ดู [โครงสร้าง, ลำดับช่อง และเส้นทางสัญญาณ](docs/architecture.md).

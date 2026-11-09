@@ -27,6 +27,12 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private string? sessionPath;
     private WasapiPlayback? player;
     private StreamingMixer? liveMixer;
+    // Speaker calibration sits between the mixer and the output; exports never see it.
+    private MonitorChain? liveChain;
+    private CalibrationFile calibrations = new();
+    // Set when calibration.json exists but cannot be read; the first save copies it aside before replacing it.
+    private bool calibrationUnreadable;
+    private bool useCalibration = true;
     private AudioDevice? selectedOutput;
     private bool stereoMonitor = true, closed;
     private OutputMode outputMode = OutputMode.Shared;
@@ -55,7 +61,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private bool restoring;
 
     public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit("session-name", "session name", audio: false); } }
-    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(HeightHint)); Changed(nameof(CanSendLfe)); Edit("layout", "speaker layout", restart: true, commit: true); ResetMeters(); } }
+    public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(HeightHint)); Changed(nameof(CanSendLfe)); CalibrationChanged(); Edit("layout", "speaker layout", restart: true, commit: true); ResetMeters(); } }
     public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit("rate", "sample rate", restart: true, commit: true); } }
     public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit("master", "master gain"); } }
     /// <summary>Seconds from the session start. Setting it while playing seeks the monitor.</summary>
@@ -87,7 +93,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public bool CanRender => !busy && Tracks.Count > 0;
     public bool CanPlay => CanRender && SelectedOutput is not null;
     // While the device list updates itself, the selection is put back afterwards and playback continues if its output is still there.
-    public AudioDevice? SelectedOutput { get => selectedOutput; set { if (selectedOutput == value) return; if (!syncingOutputs) StopPlayback(); selectedOutput = value; Changed(); Changed(nameof(CanPlay)); } }
+    public AudioDevice? SelectedOutput { get => selectedOutput; set { if (selectedOutput == value) return; if (!syncingOutputs) StopPlayback(); selectedOutput = value; Changed(); Changed(nameof(CanPlay)); CalibrationChanged(); } }
     public ModeOption[] OutputModes { get; } = [new(OutputMode.Shared, "Shared"), new(OutputMode.Exclusive, "Exclusive")];
     public OutputMode OutputMode
     {
@@ -100,7 +106,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
                 : "Shared · through the Windows mixer, volume and effects.";
         }
     }
-    public bool StereoMonitor { get => stereoMonitor; set { if (stereoMonitor == value) return; StopPlayback(); stereoMonitor = value; Changed(); ResetMeters(); } }
+    public bool StereoMonitor { get => stereoMonitor; set { if (stereoMonitor == value) return; StopPlayback(); stereoMonitor = value; Changed(); CalibrationChanged(); ResetMeters(); } }
+    /// <summary>Speakers the monitor feeds: the session layout, or Stereo for the fold-down. Each has its own calibration.</summary>
+    private SpeakerLayout MonitorLayout => StereoMonitor ? SpeakerLayout.Stereo : Layout;
+    private SpeakerCalibration? SavedCalibration => SelectedOutput is { } output ? calibrations.Find(output.Id, MonitorLayout) : null;
+    /// <summary>Switching it while playing ramps between calibrated and flat in 20 ms, for a quick A/B. Clear while nothing is saved.</summary>
+    public bool UseCalibration
+    {
+        get => useCalibration && HasCalibration;
+        set { if (useCalibration == value) return; useCalibration = value; Changed(); CalibrationChanged(); liveChain?.Update(MonitorCalibration()); }
+    }
+    public bool HasCalibration => SavedCalibration is not null;
+    public bool CanCalibrate => !busy && SelectedOutput is not null;
+    public string CalibrationLabel => SavedCalibration is null ? "CALIBRATION / NONE" : useCalibration ? "CALIBRATION / ON" : "CALIBRATION / BYPASSED";
+    public string CalibrationText => SavedCalibration is not { } c
+        ? $"No calibration for this output with {(StereoMonitor ? "stereo fold-down" : "this layout")} · Calibrate… sets trims, delays and bass management"
+        : $"{(useCalibration ? "Applied" : "Saved but bypassed")} · trim {c.Speakers.Min(s => s.TrimDb):+0.0;−0.0;0.0}…{c.Speakers.Max(s => s.TrimDb):+0.0;−0.0;0.0} dB · "
+          + $"delay up to {c.Speakers.Max(s => s.DelayMs):0.00} ms · {(c.BassManagement ? $"bass management {c.CrossoverHz} Hz{(c.LfeGain ? ", LFE +10 dB" : "")}" : "no bass management")} · monitor only";
+    private SpeakerCalibration MonitorCalibration() => useCalibration && SavedCalibration is { } saved ? saved : SpeakerCalibration.Flat(MonitorLayout);
+    private void CalibrationChanged() { Changed(nameof(HasCalibration)); Changed(nameof(UseCalibration)); Changed(nameof(CalibrationLabel)); Changed(nameof(CalibrationText)); Changed(nameof(CanCalibrate)); }
     public double MonitorVolume { get => monitorVolume; set { monitorVolume = Math.Clamp(value, 0, 1); if (player is not null) player.Volume = monitorVolume; Changed(); } }
     public bool CanEditSelected => !busy && Selected is not null;
     public bool HasLfe => Layout != SpeakerLayout.Stereo;
@@ -157,6 +181,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             }
             catch (Exception ex) { watcher = null; Status = "The output list will not follow devices by itself · use Refresh outputs · " + ex.Message; }
             await SyncOutputsAsync(manual: true);
+            LoadCalibrations();
             await OpenFilesAsync(Environment.GetCommandLineArgs().Skip(1).ToArray());
         };
         AllowDrop = true;
@@ -202,7 +227,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     {
         busy = value;
         Changed(nameof(CanEdit)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected)); Changed(nameof(CanDither));
-        Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); UndoChanged();
+        Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); Changed(nameof(CanCalibrate)); UndoChanged();
     }
     private void TrackChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -519,6 +544,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             if (SelectedOutput is not { } output) { Status = "Choose an output first."; return; }
             var document = Snapshot();
             liveMixer = new StreamingMixer(document, Tracks.Select(t => new LoadedTrack(t.Snapshot, t.Audio)).ToArray(), StereoMonitor);
+            liveChain = new MonitorChain(liveMixer, MonitorLayout, MonitorCalibration());
             // Play from the playhead; from the end it starts over.
             playFrom = (long)Math.Round(playhead * liveMixer.SampleRate);
             if (playFrom >= liveMixer.TotalFrames) { playFrom = 0; ShowPlayhead(0); }
@@ -528,9 +554,10 @@ public partial class MainWindow : Window, INotifyPropertyChanged
             {
                 if (player != media || closed) return;
                 Status = $"Playing {(StereoMonitor ? "stereo fold-down" : "session channels")} · {info.Mode} {info.Format} · {info.DeviceName} · "
-                    + $"{info.Channels} ch / {info.SampleRate / 1000d:0.#} kHz · {info.BufferMilliseconds:F0} ms {(info.Mode == OutputMode.Exclusive ? "period" : "buffer")}";
+                    + $"{info.Channels} ch / {info.SampleRate / 1000d:0.#} kHz · {info.BufferMilliseconds:F0} ms {(info.Mode == OutputMode.Exclusive ? "period" : "buffer")}"
+                    + (HasCalibration ? useCalibration ? " · calibrated" : " · calibration bypassed" : "");
             });
-            media = new WasapiPlayback(liveMixer, output.Id, MonitorVolume, started, OutputMode);
+            media = new WasapiPlayback(liveChain, output.Id, MonitorVolume, started, OutputMode);
             player = media;
             Status = "Opening WASAPI monitor…";
         }
@@ -615,6 +642,44 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         catch (Exception ex) { Error(ex); return null; }
         finally { operation.Dispose(); operation = null; SetBusy(false); }
     }
+    // A file that cannot be read is left where it is; the first save copies it to calibration.json.unreadable-<time>.
+    private void LoadCalibrations()
+    {
+        try { calibrations = CalibrationStore.Load(CalibrationStore.DefaultPath); calibrationUnreadable = false; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            calibrations = new(); calibrationUnreadable = true;
+            Status = $"Speaker calibration not loaded · {ex.Message} · playing uncalibrated; saving a new calibration first keeps a copy of the old file.";
+        }
+        CalibrationChanged();
+    }
+    private void Calibrate_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanCalibrate || SelectedOutput is not { } output) return;
+        StopPlayback();
+        var speakers = MonitorLayout;
+        string layoutName = StereoMonitor ? "Stereo fold-down" : Layouts.First(l => l.Layout == Layout).Name;
+        var current = calibrations.Find(output.Id, speakers) ?? SpeakerCalibration.Flat(speakers, output.Id, output.Name);
+        var dialog = new CalibrationWindow(output, OutputMode, speakers, SampleRate, MonitorVolume, current, layoutName, playbackStopped) { Owner = this };
+        bool saved = dialog.ShowDialog() == true;
+        // The next playback waits until the test noise has released the output.
+        playbackStopped = dialog.Stopped;
+        MonitorVolume = dialog.MonitorVolume;
+        if (!saved || dialog.Result is not { } result) { Status = "Calibration unchanged."; return; }
+        var updated = calibrations.With(result);
+        string? kept = null;
+        try
+        {
+            if (calibrationUnreadable) kept = CalibrationStore.KeepUnreadable(CalibrationStore.DefaultPath, DateTime.Now);
+            CalibrationStore.Save(CalibrationStore.DefaultPath, updated);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        { Error(new IOException($"Calibration not saved · {ex.Message}", ex)); return; }
+        calibrations = updated; calibrationUnreadable = false;
+        useCalibration = true; Changed(nameof(UseCalibration)); CalibrationChanged();
+        Status = $"Calibration saved for {output.Name} · {layoutName} · applies to the monitor only, exports are unchanged."
+            + (kept is null ? "" : $" The unreadable file was kept as {Path.GetFileName(kept)}.");
+    }
     private void Stop_Click(object sender, RoutedEventArgs e)
     {
         operation?.Cancel(); StopPlayback();
@@ -625,7 +690,7 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         var previous = player;
         // Stopping leaves the playhead where playback was heard, so Space continues from there.
         if (previous is not null && liveMixer is { SeekPending: false } mixer) ShowPlayhead(Audible(mixer, previous));
-        player = null; liveMixer = null;
+        player = null; liveMixer = null; liveChain = null;
         if (previous is null) return;
         previous.Dispose();
         playbackStopped = previous.Completion.ContinueWith(task => { _ = task.Exception; }, TaskScheduler.Default);

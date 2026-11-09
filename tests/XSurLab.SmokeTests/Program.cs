@@ -810,6 +810,215 @@ try
         File.Move(large, large + ".moved"); File.Delete(large + ".moved"); // delete is shared even while the buffer is alive
         Equal(audio[0, 0], -1000 / 32768f); // the cached block holds the end, so this reads the deleted file
     });
+    Test("A flat calibration leaves the monitor bit-exact; trims and delays act per speaker and the delay plays out", () =>
+    {
+        var tone = new AudioBuffer(48000, 1, Enumerable.Range(0, 4800).Select(i => (float)(Math.Sin(i * .05) * .5)).ToArray());
+        var t = Track("flat.wav") with { Azimuth = 20, LfeDb = -6 };
+        var session = Session(SpeakerLayout.Surround51, t);
+        var plain = Drain(new StreamingMixer(session, [new(t, tone)]), 700);
+        var flat = Drain(new MonitorChain(new StreamingMixer(session, [new(t, tone)]), SpeakerLayout.Surround51), 700);
+        Equal(flat.Length, plain.Length);
+        for (int i = 0; i < plain.Length; i++) if (flat[i] != plain[i]) throw new Exception($"Flat calibration changed sample {i}.");
+        var impulse = new float[480]; impulse[0] = .5f;
+        var centre = Track("c.wav") with { Azimuth = 0 };
+        var left = Track("l.wav") with { Azimuth = -30, StartSeconds = 10 / 48000d };
+        var calibration = SpeakerCalibration.Flat(SpeakerLayout.Surround51) with
+        {
+            Speakers = [new("L", 3), new("R"), new("C", -6, 2), new("LFE"), new("Ls"), new("Rs")]
+        };
+        var mixer = new StreamingMixer(Session(SpeakerLayout.Surround51, centre, left),
+            [new(centre, new AudioBuffer(48000, 1, impulse)), new(left, new AudioBuffer(48000, 1, impulse))]);
+        var output = Drain(new MonitorChain(mixer, SpeakerLayout.Surround51, calibration), 128);
+        Equal(output.Length / 6, 490 + 96); // 2 ms of C delay at 48 kHz play out after the mix ends
+        for (int f = 0; f < output.Length / 6; f++)
+            for (int c = 0; c < 6; c++)
+                Near(output[f * 6 + c], c == 2 && f == 96 ? .5 * Math.Pow(10, -6 / 20d) : c == 0 && f == 10 ? .5 * Math.Pow(10, 3 / 20d) : 0, 1e-9);
+        Throws<ArgumentException>(() => new MonitorChain(new StreamingMixer(session, [new(t, tone)]), SpeakerLayout.Surround51, SpeakerCalibration.Flat(SpeakerLayout.Surround71)));
+        Throws<ArgumentException>(() => new MonitorChain(new StreamingMixer(session, [new(t, tone)]), SpeakerLayout.Stereo));
+        Throws<InvalidDataException>(() => new MonitorChain(Tone(SpeakerLayout.Stereo, 0, 100, .1), SpeakerLayout.Stereo,
+            SpeakerCalibration.Flat(SpeakerLayout.Stereo) with { BassManagement = true }));
+    });
+    Test("Bass management crosses over at 24 dB/oct, sums flat and puts LFE +10 dB on the subwoofer", () =>
+    {
+        var layout = SpeakerLayout.Surround51;
+        var managed = SpeakerCalibration.Flat(layout) with { BassManagement = true, CrossoverHz = 80 };
+        double input = Db(.5 / Math.Sqrt(2));
+        foreach (var hz in new[] { 30, 80, 300, 2000 })
+        {
+            var o = Drain(new MonitorChain(Tone(layout, 0, hz, 2), layout, managed), 4800);
+            double l = Db(Rms(o, 6, f => o[f * 6])), sub = Db(Rms(o, 6, f => o[f * 6 + 3])), sum = Db(Rms(o, 6, f => o[f * 6] + o[f * 6 + 3]));
+            Console.WriteLine($"  {hz,4} Hz on L · L {l - input:F1} dB · sub {sub - input:F1} dB · L+sub {sum - input:F3} dB");
+            Near(sum, input, .05);
+            for (int c = 1; c < 6; c++) if (c != 3) Check(o.Where((_, i) => i % 6 == c).All(x => x == 0), "Only L and the subwoofer carry L's signal");
+            if (hz == 30) Check(l < sub - 25, "30 Hz goes to the subwoofer");
+            if (hz == 80) { Near(l, sub, .2); Near(l, input - 6.02, .2); }
+            if (hz == 2000) Check(sub < l - 60, "2 kHz stays on L");
+        }
+        foreach (var (calibration, gain) in new[] { (managed, Math.Pow(10, .5)), (managed with { LfeGain = false }, 1), (SpeakerCalibration.Flat(layout), 1) })
+        {
+            var source = Tone(layout, 3, 40, .5);
+            var reference = Drain(Tone(layout, 3, 40, .5), 480);
+            var o = Drain(new MonitorChain(source, layout, calibration), 480);
+            for (int f = 0; f < reference.Length / 6; f++) Near(o[f * 6 + 3], reference[f * 6 + 3] * gain, 1e-12);
+        }
+    });
+    Test("Live trim, delay, crossover and bass-management changes ramp without jumps", () =>
+    {
+        var layout = SpeakerLayout.Surround51;
+        var chain = new MonitorChain(Tone(layout, 0, 100, 3), layout);
+        var random = new Random(5);
+        var block = new double[100 * 6];
+        double previous = 0, worst = 0;
+        bool managed = false;
+        int crossover = 80;
+        for (int i = 0; ; i++)
+        {
+            if (i % 30 == 0) managed = !managed;
+            if (i % 45 == 0) crossover = SpeakerCalibration.Crossovers[random.Next(4)];
+            chain.Update(SpeakerCalibration.Flat(layout) with
+            {
+                Speakers = [new("L", -random.Next(13) / 2d, random.Next(201) / 10d), new("R"), new("C"), new("LFE"), new("Ls"), new("Rs")],
+                BassManagement = managed, CrossoverHz = crossover
+            });
+            int frames = chain.Read(block);
+            if (frames == 0) break;
+            for (int f = 0; f < frames; f++) { worst = Math.Max(worst, Math.Abs(block[f * 6] - previous)); previous = block[f * 6]; }
+            if (chain.Finished) break;
+        }
+        // A 100 Hz sine at −6 dBFS moves at most 0.0065 per sample; an unramped 1 ms delay jump would move about 0.3.
+        Console.WriteLine($"  largest step between samples while changing every 100 frames {worst:F4}");
+        Check(worst < .012, "Calibration changes must ramp");
+    });
+    Test("The delay tail follows the calibration in effect when the mix ends", () =>
+    {
+        var layout = SpeakerLayout.Surround51;
+        SpeakerCalibration Delayed(double ms) => SpeakerCalibration.Flat(layout) with { Speakers = [new("L", 0, ms), new("R"), new("C"), new("LFE"), new("Ls"), new("Rs")] };
+        // A delay published for the last block still plays out in full.
+        var late = new MonitorChain(Tone(layout, 0, 100, 1000 / 48000d), layout);
+        var block = new double[2000 * 6];
+        Equal(late.Read(block.AsSpan(0, 1000 * 6)), 1000);
+        late.Update(Delayed(10));
+        Equal(late.Read(block), 480);
+        Check(late.Finished, "Finished once the 10 ms tail has been read");
+        // Back to flat: once the crossfade is over, the old delay no longer lengthens the end.
+        var back = new MonitorChain(Tone(layout, 0, 100, 1), layout, Delayed(10));
+        back.Read(new double[4800 * 6]);
+        back.Update(SpeakerCalibration.Flat(layout));
+        Equal(4800 + Drain(back, 4800).Length / 6, 48000);
+    });
+    Test("A seek clears delayed audio, so nothing from before the jump is heard", () =>
+    {
+        var tone = new AudioBuffer(48000, 1, Enumerable.Range(0, 48000).Select(i => (float)(Math.Sin(i * .03) * .5)).ToArray());
+        var c = Track("seek.wav") with { Azimuth = 0 };
+        var mixer = new StreamingMixer(Session(SpeakerLayout.Surround51, c), [new(c, tone)]);
+        var chain = new MonitorChain(mixer, SpeakerLayout.Surround51, SpeakerCalibration.Flat(SpeakerLayout.Surround51) with
+        {
+            Speakers = [new("L"), new("R"), new("C", 0, 10), new("LFE"), new("Ls"), new("Rs")]
+        });
+        var block = new double[4800 * 6];
+        chain.Read(block); chain.Read(block);
+        mixer.Seek(24000);
+        Check(chain.SeekPending, "The chain reports the mixer's pending seek");
+        chain.Read(block);
+        for (int f = 0; f < 480; f++) Equal(block[f * 6 + 2], 0d);
+        Check(Enumerable.Range(480, 4320).Any(f => block[f * 6 + 2] != 0), "The new position is heard after the 10 ms delay");
+    });
+    Test("Test noise plays one speaker at −20 dBFS RMS in its band, stays below −8 dBFS and fades between speakers", () =>
+    {
+        foreach (int rate in new[] { 44100, 48000, 96000 })
+        {
+            var noise = new TestSignal(rate, SpeakerLayout.Surround51) { SpeakerIndex = 0 };
+            var block = new double[rate * 6];
+            noise.Read(block);
+            foreach (var (index, band) in new[] { (0, "mains"), (3, "sub") })
+            {
+                if (index != noise.SpeakerIndex)
+                {
+                    noise.SpeakerIndex = index;
+                    var turn = new double[rate / 10 * 6];
+                    noise.Read(turn);
+                    int lastOld = Enumerable.Range(0, rate / 10).Last(f => turn[f * 6] != 0 || f == 0), firstNew = Enumerable.Range(0, rate / 10).First(f => turn[f * 6 + index] != 0);
+                    Check(lastOld < firstNew && lastOld <= rate / 50, "The old speaker fades out within 20 ms before the new one starts");
+                }
+                // Energy outside the band, measured through a 12 dB/oct filter that passes it.
+                var outside = Biquad.Design(index == 3 ? EqBandKind.HighPass : EqBandKind.LowPass, new EqBand(true, index == 3 ? 500 : 200), rate);
+                double[] h = new double[4];
+                double power = 0, leak = 0, peak = 0;
+                long n = 0;
+                for (int second = 0; second < 5; second++)
+                {
+                    noise.Read(block);
+                    for (int f = 0; f < rate; f++, n++)
+                    {
+                        for (int c = 0; c < 6; c++) if (c != index && block[f * 6 + c] != 0) throw new Exception($"Noise leaked to channel {c}.");
+                        double x = block[f * 6 + index], y = outside.B0 * x + outside.B1 * h[0] + outside.B2 * h[1] - outside.A1 * h[2] - outside.A2 * h[3];
+                        h[1] = h[0]; h[0] = x; h[3] = h[2]; h[2] = y;
+                        power += x * x; leak += y * y; peak = Math.Max(peak, Math.Abs(x));
+                    }
+                }
+                double level = 10 * Math.Log10(power / n), outsideDb = 10 * Math.Log10(leak / power);
+                Console.WriteLine($"  {rate / 1000d:0.#} kHz {band} · {level:F2} dBFS RMS · peak {Db(peak):F1} dBFS · out of band {outsideDb:F1} dB");
+                Near(level, TestSignal.LevelDb, .5);
+                Check(peak <= TestSignal.PeakLimit, "Noise peaks stay 12 dB above its RMS");
+                Check(outsideDb < -15, $"{band} noise stays in its band");
+            }
+        }
+        string Names(SpeakerLayout layout) => string.Join(" ", TestSignal.Order(layout).Select(i => SpatialMixer.Speakers(layout)[i].Name));
+        Equal(Names(SpeakerLayout.Surround51), "L C R Rs Ls LFE");
+        Equal(Names(SpeakerLayout.Surround714), "L C R Rs Rb Lb Ls Tfl Tfr Tbr Tbl LFE");
+        Equal(Names(SpeakerLayout.Stereo), "L R");
+    });
+    Test("Calibration files round-trip per output and layout, refuse bad values and keep the replaced file", () =>
+    {
+        var path = Path.Combine(root, "calibration", "calibration.json");
+        Equal(CalibrationStore.Load(path).Profiles.Count, 0);
+        var five = SpeakerCalibration.Flat(SpeakerLayout.Surround51, "{0.0.0.00000000}.{a}", "Speakers") with
+        {
+            Speakers = [new("L", -1.5, .25), new("R", 2), new("C", 0, 3.5), new("LFE", -4), new("Ls", 0, 12.3), new("Rs", 10, 50)],
+            BassManagement = true, CrossoverHz = 100, LfeGain = false
+        };
+        var stereo = SpeakerCalibration.Flat(SpeakerLayout.Stereo, five.DeviceId, "Speakers") with { Speakers = [new("L", -20), new("R")] };
+        var file = new CalibrationFile().With(five).With(stereo);
+        CalibrationStore.Save(path, file);
+        var loaded = CalibrationStore.Load(path);
+        var back = loaded.Find(five.DeviceId, SpeakerLayout.Surround51)!;
+        Check(back with { Speakers = five.Speakers } == five && back.Speakers.SequenceEqual(five.Speakers), "Profiles round-trip");
+        Check(loaded.Find(five.DeviceId, SpeakerLayout.Surround71) is null && loaded.Find("other", SpeakerLayout.Stereo) is null, "Profiles are per output and layout");
+        Equal(loaded.With(five with { CrossoverHz = 60 }).Profiles.Count, 2);
+        var first = File.ReadAllText(path);
+        CalibrationStore.Save(path, loaded.With(stereo with { Speakers = [new("L"), new("R", -3)] }));
+        Equal(File.ReadAllText(path + ".bak"), first);
+        Check(Directory.GetFiles(Path.GetDirectoryName(path)!).All(f => !f.EndsWith(".tmp")), "No temporary file is left behind");
+        SpeakerCalibration With(int speaker, SpeakerTrim trim) => five with { Speakers = five.Speakers.Select((s, i) => i == speaker ? trim : s).ToList() };
+        foreach (var bad in new[]
+        {
+            With(0, new("L", double.NaN)), With(0, new("L", 10.5)), With(0, new("L", -20.5)), With(1, new("R", 0, -.1)), With(1, new("R", 0, 50.1)),
+            With(2, new("Ls")), five with { CrossoverHz = 90 }, five with { DeviceId = "" }, five with { Speakers = five.Speakers.Take(5).ToList() },
+            stereo with { BassManagement = true }, five with { Layout = (SpeakerLayout)42 }
+        })
+            Throws<InvalidDataException>(() => CalibrationStore.Validate(bad));
+        Throws<InvalidDataException>(() => CalibrationStore.Validate(new CalibrationFile { Profiles = [five, five with { CrossoverHz = 60 }] }));
+        foreach (var json in new[] { "{", "{\"Version\":2,\"Profiles\":[]}", first.Replace("\"Surround51\"", "\"Quad\""), first.Replace("\"Rs\"", "\"Rb\"") })
+        {
+            File.WriteAllText(path, json);
+            Throws<InvalidDataException>(() => CalibrationStore.Load(path));
+        }
+        File.WriteAllText(path, new string(' ', 1024 * 1024 + 1));
+        Throws<InvalidDataException>(() => CalibrationStore.Load(path));
+        // An unreadable file is copied aside before the first save, so two saves (which rotate .bak) cannot lose it.
+        var when = new DateTime(2026, 11, 10, 2, 30, 0);
+        var aside = CalibrationStore.KeepUnreadable(path, when)!;
+        Equal(Path.GetFileName(aside), "calibration.json.unreadable-20261110-023000");
+        Equal(new FileInfo(aside).Length, 1024 * 1024 + 1L);
+        Equal(Path.GetFileName(CalibrationStore.KeepUnreadable(path, when)!), "calibration.json.unreadable-20261110-023000-2");
+        CalibrationStore.Save(path, file); CalibrationStore.Save(path, file);
+        Check(File.Exists(aside), "Saving twice keeps the unreadable copy");
+        Equal(CalibrationStore.KeepUnreadable(Path.Combine(root, "calibration", "missing.json"), when), null);
+        var delays = SpeakerCalibration.DelaysFromDistances([3, 2.5, 3]);
+        Check(delays.SequenceEqual([0, 1.46, 0]), $"Delays from distances, got {string.Join(", ", delays)}");
+        Equal(SpeakerCalibration.DelaysFromDistances([20, 0]).Max(), SpeakerCalibration.MaxDelayMs); // 58 ms is capped
+        Throws<ArgumentOutOfRangeException>(() => SpeakerCalibration.DelaysFromDistances([1, -1]));
+    });
 }
 finally { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); Directory.Delete(root, recursive: true); }
 Console.WriteLine($"{count - failures}/{count} checks passed.");
@@ -906,6 +1115,55 @@ string Fixture(string name, int channels, int bits, int format, int frames, Func
         }
     if ((size & 1) != 0) writer.Write((byte)0);
     return path;
+}
+// Reads a source to its end in blocks of the given size.
+double[] Drain(IAudioSource source, int frames)
+{
+    var all = new List<double>();
+    var block = new double[frames * source.Channels];
+    while (!source.Finished)
+    {
+        int read = source.Read(block);
+        if (read == 0) break;
+        all.AddRange(block.AsSpan(0, read * source.Channels).ToArray());
+    }
+    return all.ToArray();
+}
+Buffered Tone(SpeakerLayout layout, int channel, double hz, double seconds, int rate = 48000)
+{
+    int channels = SpatialMixer.Speakers(layout).Length, frames = (int)Math.Round(seconds * rate);
+    var samples = new double[frames * channels];
+    for (int f = 0; f < frames; f++) samples[f * channels + channel] = .5 * Math.Sin(2 * Math.PI * hz * f / rate);
+    return new Buffered(rate, layout, samples);
+}
+// RMS over the second half, after filters have settled.
+double Rms(double[] samples, int channels, Func<int, double> sample)
+{
+    int frames = samples.Length / channels;
+    double power = 0;
+    for (int f = frames / 2; f < frames; f++) { double x = sample(f); power += x * x; }
+    return Math.Sqrt(power / (frames - frames / 2));
+}
+double Db(double value) => 20 * Math.Log10(value);
+
+/// <summary>Plays a fixed interleaved buffer, so the monitor chain can be fed exact channel content.</summary>
+sealed class Buffered(int rate, SpeakerLayout layout, double[] samples) : IAudioSource
+{
+    private long frame;
+    public int SampleRate => rate;
+    public int Channels { get; } = SpatialMixer.Speakers(layout).Length;
+    public uint ChannelMask { get; } = SpatialMixer.ChannelMask(layout);
+    public bool SeekPending => false;
+    public int Seeks => 0;
+    public bool Finished => frame * Channels >= samples.Length;
+    public int Read(Span<double> destination, CancellationToken cancellationToken = default)
+    {
+        destination.Clear();
+        int frames = (int)Math.Min(destination.Length / Channels, samples.Length / Channels - frame);
+        samples.AsSpan((int)(frame * Channels), frames * Channels).CopyTo(destination);
+        frame += frames;
+        return frames;
+    }
 }
 
 
