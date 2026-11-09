@@ -19,6 +19,7 @@ public sealed class TrackViewModel(TrackSettings settings, AudioBuffer audio) : 
     public double Azimuth { get => settings.Azimuth; set { settings = settings with { Azimuth = value }; Changed(); } }
     public double Elevation { get => settings.Elevation; set { settings = settings with { Elevation = value }; Changed(); } }
     public double Spread { get => settings.Spread; set { settings = settings with { Spread = value }; Changed(); } }
+    public TrackEq Eq { get => settings.Eq; set { settings = settings with { Eq = value }; Changed(); } }
     public double LfeDb { get => settings.LfeDb; set { settings = settings with { LfeDb = value }; Changed(); } }
     public double StartSeconds { get => settings.StartSeconds; set { settings = settings with { StartSeconds = value }; Changed(); } }
     public bool Mute { get => settings.Mute; set { settings = settings with { Mute = value }; Changed(); } }

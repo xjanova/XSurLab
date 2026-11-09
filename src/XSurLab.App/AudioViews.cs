@@ -135,6 +135,136 @@ public sealed class PannerView : FrameworkElement
 }
 
 
+/// <summary>
+/// Track EQ response on a log axis (20 Hz–20 kHz, ±24 dB) with a handle per band. Dragging a handle moves its band and
+/// switches it on (gain bands also move vertically); the wheel sets Q; a double-click switches the band on or off.
+/// </summary>
+public sealed class EqView : FrameworkElement
+{
+    public static readonly DependencyProperty EqProperty = DependencyProperty.Register(nameof(Eq), typeof(TrackEq), typeof(EqView),
+        new FrameworkPropertyMetadata(TrackEq.Flat, FrameworkPropertyMetadataOptions.AffectsRender | FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
+    public static readonly DependencyProperty SampleRateProperty = DependencyProperty.Register(nameof(SampleRate), typeof(int), typeof(EqView),
+        new FrameworkPropertyMetadata(48000, FrameworkPropertyMetadataOptions.AffectsRender));
+    public static readonly DependencyProperty SelectedBandProperty = DependencyProperty.Register(nameof(SelectedBand), typeof(int), typeof(EqView),
+        new FrameworkPropertyMetadata(0, FrameworkPropertyMetadataOptions.AffectsRender | FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
+    public TrackEq? Eq { get => (TrackEq?)GetValue(EqProperty); set => SetValue(EqProperty, value); }
+    public int SampleRate { get => (int)GetValue(SampleRateProperty); set => SetValue(SampleRateProperty, value); }
+    public int SelectedBand { get => (int)GetValue(SelectedBandProperty); set => SetValue(SelectedBandProperty, value); }
+    private const double MinHz = 20, Decades = 3, Range = 24;
+    private bool dragging;
+    private double Left => 30;
+    private double Right => Math.Max(Left + 1, ActualWidth - 8);
+    private double Top => 8;
+    private double Bottom => Math.Max(Top + 1, ActualHeight - 18);
+    private double X(double hz) => Left + (Math.Log10(hz / MinHz) / Decades) * (Right - Left);
+    private double Frequency(double x) => MinHz * Math.Pow(10, Math.Clamp((x - Left) / (Right - Left), 0, 1) * Decades);
+    private double Y(double db) => Top + (Range - Math.Clamp(db, -Range, Range)) / (2 * Range) * (Bottom - Top);
+    private double Db(double y) => Range - (y - Top) / (Bottom - Top) * 2 * Range;
+
+    /// <summary>Rounds a frequency to what the controls show: whole hertz below 1 kHz, 10 Hz steps above.</summary>
+    public static double Nice(double hz) { hz = Math.Clamp(hz, 20, 20000); return hz < 1000 ? Math.Round(hz) : Math.Round(hz / 10) * 10; }
+    public static string Hz(double hz) => hz < 1000 ? $"{hz:0} Hz" : $"{hz / 1000:0.##} kHz";
+
+    public EqView() { IsEnabledChanged += (_, _) => InvalidateVisual(); }
+
+    protected override void OnRender(DrawingContext dc)
+    {
+        dc.DrawRectangle(new SolidColorBrush(Color.FromRgb(16, 20, 26)), null, new(0, 0, ActualWidth, ActualHeight));
+        if (ActualWidth < 80 || ActualHeight < 60) return;
+        var dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var grid = new Pen(new SolidColorBrush(Color.FromRgb(40, 48, 58)), 1);
+        var axis = new Pen(new SolidColorBrush(Color.FromRgb(70, 82, 96)), 1);
+        var muted = new SolidColorBrush(Color.FromRgb(148, 162, 180));
+        FormattedText Text(string s, Brush brush) => new(s, CultureInfo.InvariantCulture, FlowDirection.LeftToRight, new Typeface("Segoe UI"), 9, brush, dpi);
+        foreach (var hz in new double[] { 50, 100, 200, 500, 1000, 2000, 5000, 10000 })
+        {
+            dc.DrawLine(grid, new(X(hz), Top), new(X(hz), Bottom));
+            if (hz is 100 or 1000 or 10000 or 50 or 500 or 5000) { var t = Text(hz < 1000 ? $"{hz}" : $"{hz / 1000}k", muted); dc.DrawText(t, new(X(hz) - t.Width / 2, Bottom + 3)); }
+        }
+        foreach (var db in new[] { -18, -12, -6, 0, 6, 12, 18 })
+        {
+            dc.DrawLine(db == 0 ? axis : grid, new(Left, Y(db)), new(Right, Y(db)));
+            if (db % 12 == 0) { var t = Text(db > 0 ? $"+{db}" : db < 0 ? $"−{-db}" : "0", muted); dc.DrawText(t, new(Left - 5 - t.Width, Y(db) - t.Height / 2)); }
+        }
+        var eq = Eq ?? TrackEq.Flat;
+        int rate = SampleRate > 0 ? SampleRate : 48000;
+        var bands = eq.Design(rate);
+        var curve = new StreamGeometry();
+        using (var context = curve.Open())
+        {
+            for (double x = Left; x <= Right; x += 1)
+            {
+                double hz = Frequency(x), db = bands.Sum(b => b.MagnitudeDb(Math.Min(hz, rate * .4999), rate));
+                var point = new Point(x, Y(db));
+                if (x == Left) context.BeginFigure(point, false, false); else context.LineTo(point, true, false);
+            }
+        }
+        curve.Freeze();
+        var accent = Color.FromRgb(221, 184, 121);
+        dc.DrawGeometry(null, new Pen(new SolidColorBrush(IsEnabled ? accent : Color.FromRgb(90, 100, 112)), 2), curve);
+        if (!IsEnabled) return;
+        for (int i = 0; i < TrackEq.Count; i++)
+        {
+            var band = eq.Band(i);
+            var p = Handle(eq, i);
+            bool selected = i == SelectedBand;
+            dc.DrawEllipse(band.On ? new SolidColorBrush(accent) : new SolidColorBrush(Color.FromRgb(36, 43, 52)),
+                new Pen(selected ? Brushes.WhiteSmoke : new SolidColorBrush(band.On ? accent : Color.FromRgb(110, 122, 136)), selected ? 2 : 1), p, 6, 6);
+            var label = Text((i + 1).ToString(CultureInfo.InvariantCulture), band.On ? new SolidColorBrush(Color.FromRgb(23, 28, 34)) : muted);
+            dc.DrawText(label, new(p.X - label.Width / 2, p.Y - label.Height / 2));
+            if (selected) { var name = Text(TrackEq.Names[i], Brushes.WhiteSmoke); dc.DrawText(name, new(Math.Clamp(p.X - name.Width / 2, Left, Right - name.Width), Math.Max(0, p.Y - 22))); }
+        }
+    }
+
+    private Point Handle(TrackEq eq, int index)
+    {
+        var band = eq.Band(index);
+        return new(X(band.Frequency), Y(TrackEq.HasGain(index) ? band.GainDb : 0));
+    }
+    private int Nearest(Point point)
+    {
+        var eq = Eq ?? TrackEq.Flat;
+        int best = -1; double distance = 14;
+        for (int i = 0; i < TrackEq.Count; i++)
+        {
+            var v = Handle(eq, i) - point;
+            if (v.Length < distance) { distance = v.Length; best = i; }
+        }
+        return best;
+    }
+
+    protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
+    {
+        if (!IsEnabled) return;
+        int band = Nearest(e.GetPosition(this));
+        if (band < 0) return;
+        SetCurrentValue(SelectedBandProperty, band);
+        var eq = Eq ?? TrackEq.Flat;
+        if (e.ClickCount == 2) { SetCurrentValue(EqProperty, eq.WithBand(band, eq.Band(band) with { On = !eq.Band(band).On })); e.Handled = true; return; }
+        dragging = true; CaptureMouse(); Focus(); e.Handled = true;
+    }
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (!dragging || !IsMouseCaptured) return;
+        var point = e.GetPosition(this);
+        var eq = Eq ?? TrackEq.Flat;
+        int index = SelectedBand;
+        var band = eq.Band(index) with { On = true, Frequency = Nice(Frequency(point.X)) };
+        if (TrackEq.HasGain(index)) band = band with { GainDb = Math.Clamp(Math.Round(Db(point.Y) * 2) / 2, -Range, Range) };
+        if (band != eq.Band(index)) SetCurrentValue(EqProperty, eq.WithBand(index, band));
+    }
+    protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e) { dragging = false; ReleaseMouseCapture(); }
+    protected override void OnMouseWheel(MouseWheelEventArgs e)
+    {
+        if (!IsEnabled || !TrackEq.HasQ(SelectedBand)) return;
+        var eq = Eq ?? TrackEq.Flat;
+        var band = eq.Band(SelectedBand);
+        double q = Math.Clamp(Math.Round(band.Q * (e.Delta > 0 ? 1.12 : 1 / 1.12), 2), .1, 10);
+        SetCurrentValue(EqProperty, eq.WithBand(SelectedBand, band with { On = true, Q = q }));
+        e.Handled = true;
+    }
+}
+
 /// <summary>Vertical sample-peak bars per output channel with 1.5 s peak hold; bars fall at 12 dB/s.</summary>
 public sealed class MeterView : FrameworkElement
 {

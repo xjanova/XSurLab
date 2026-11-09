@@ -36,13 +36,15 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     private long meterFrames = -1;
     private SampleFormat exportFormat = SampleFormat.Pcm24;
     private bool exportDither = true, exportBroadcast = true;
+    private bool showEq;
+    private int eqBand = 2;
     private string momentaryText = "M   —", shortTermText = "S   —", integratedText = "I   — LUFS", truePeakText = "TP  — dBTP";
 
     public string SessionName { get => sessionName; set { sessionName = value; Changed(); Edit(audio: false); } }
     public SpeakerLayout Layout { get => layout; set { layout = value; Changed(); Changed(nameof(OutputLabels)); Changed(nameof(HasLfe)); Changed(nameof(HeightHint)); Changed(nameof(CanSendLfe)); Edit(restart: true); ResetMeters(); } }
     public int SampleRate { get => sampleRate; set { sampleRate = value; Changed(); Edit(restart: true); } }
     public double MasterGainDb { get => masterGainDb; set { masterGainDb = value; Changed(); Edit(); } }
-    public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); } }
+    public TrackViewModel? Selected { get => selected; set { selected = value; Changed(); Changed(nameof(CanEditSelected)); Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe)); BandChanged(); } }
     public bool CanPanSelected => CanEditSelected && Selected?.CanPan == true;
     public bool CanSendLfe => CanPanSelected && HasLfe;
     public string Status { get => status; private set { status = value; Changed(); } }
@@ -67,6 +69,25 @@ public partial class MainWindow : Window, INotifyPropertyChanged
     public string ShortTermText { get => shortTermText; private set { shortTermText = value; Changed(); } }
     public string IntegratedText { get => integratedText; private set { integratedText = value; Changed(); } }
     public string TruePeakText { get => truePeakText; private set { truePeakText = value; Changed(); } }
+    public bool ShowEq { get => showEq; set { if (showEq == value) return; showEq = value; Changed(); Changed(nameof(ShowSpatial)); } }
+    public bool ShowSpatial { get => !showEq; set => ShowEq = !value; }
+    public string[] EqBandNames => TrackEq.Names;
+    public int EqBandIndex { get => eqBand; set { eqBand = Math.Clamp(value, 0, TrackEq.Count - 1); BandChanged(); } }
+    private EqBand Band => (Selected?.Eq ?? TrackEq.Flat).Band(eqBand);
+    // Moving a control switches its band on, so what is adjusted is what is heard.
+    private void SetBand(EqBand band) { if (Selected is { } track && track.Eq.Band(eqBand) != band) track.Eq = track.Eq.WithBand(eqBand, band); }
+    public bool BandOn { get => Band.On; set => SetBand(Band with { On = value }); }
+    public double BandFrequencyLog { get => Math.Log10(Band.Frequency); set => SetBand(Band with { On = true, Frequency = EqView.Nice(Math.Pow(10, value)) }); }
+    public double BandGainDb { get => Band.GainDb; set => SetBand(Band with { On = true, GainDb = Math.Clamp(Math.Round(value * 2) / 2, -24, 24) }); }
+    public double BandQLog { get => Math.Log10(Band.Q); set => SetBand(Band with { On = true, Q = Math.Clamp(Math.Round(Math.Pow(10, value), 2), .1, 10) }); }
+    public bool BandHasGain => TrackEq.HasGain(eqBand);
+    public bool BandHasQ => TrackEq.HasQ(eqBand);
+    public string BandText => $"{EqView.Hz(Band.Frequency)}{(BandHasGain ? $" · {Band.GainDb:+0.0;−0.0;0.0} dB" : "")}{(BandHasQ ? $" · Q {Band.Q:0.00}" : "")}";
+    private void BandChanged()
+    {
+        foreach (var name in new[] { nameof(EqBandIndex), nameof(BandOn), nameof(BandFrequencyLog), nameof(BandGainDb), nameof(BandQLog), nameof(BandHasGain), nameof(BandHasQ), nameof(BandText) })
+            Changed(name);
+    }
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public MainWindow()
@@ -118,7 +139,11 @@ public partial class MainWindow : Window, INotifyPropertyChanged
         Changed(nameof(CanEdit)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected)); Changed(nameof(CanDither));
         Changed(nameof(CanPanSelected)); Changed(nameof(CanSendLfe));
     }
-    private void TrackChanged(object? sender, PropertyChangedEventArgs e) => Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName != nameof(TrackViewModel.Name));
+    private void TrackChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        Edit(restart: e.PropertyName == nameof(TrackViewModel.StartSeconds), audio: e.PropertyName != nameof(TrackViewModel.Name));
+        if (e.PropertyName == nameof(TrackViewModel.Eq) && ReferenceEquals(sender, Selected)) BandChanged();
+    }
     private void RefreshTracks()
     {
         Changed(nameof(TrackSummary)); Changed(nameof(CanRender)); Changed(nameof(CanPlay)); Changed(nameof(CanEditSelected));

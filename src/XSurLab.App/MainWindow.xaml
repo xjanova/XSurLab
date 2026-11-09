@@ -87,12 +87,31 @@
           <Border Style="{StaticResource Card}">
             <Grid>
               <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-              <TextBlock Text="SPATIAL POSITION" Style="{StaticResource Label}"/>
-              <StackPanel Grid.Row="2" Margin="0,8,0,0">
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <RadioButton Style="{StaticResource Tab}" Content="SPATIAL POSITION" IsChecked="{Binding ShowSpatial}" GroupName="View" AutomationProperties.Name="Show spatial position"/>
+                <RadioButton Style="{StaticResource Tab}" Content="TRACK EQ" IsChecked="{Binding ShowEq}" GroupName="View" AutomationProperties.Name="Show track EQ"/>
+              </StackPanel>
+              <StackPanel Grid.Row="2" Margin="0,8,0,0" Visibility="{Binding ShowSpatial, Converter={StaticResource Visible}}">
                 <TextBlock Text="{Binding OutputLabels}" Foreground="{StaticResource Accent}" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
                 <TextBlock Text="Drag to pan · stereo sources rotate as a ±30° pair · beds route by channel mask · inner ring = height speakers." Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
               </StackPanel>
-              <local:PannerView Grid.Row="1" Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" Elevation="{Binding Selected.Elevation, Mode=TwoWay}" Spread="{Binding Selected.Spread}" IsEnabled="{Binding CanPanSelected}" MinHeight="0" AutomationProperties.Name="Surround source position"/>
+              <local:PannerView Grid.Row="1" Layout="{Binding Layout}" Azimuth="{Binding Selected.Azimuth, Mode=TwoWay}" Elevation="{Binding Selected.Elevation, Mode=TwoWay}" Spread="{Binding Selected.Spread}" IsEnabled="{Binding CanPanSelected}" MinHeight="0" AutomationProperties.Name="Surround source position" Visibility="{Binding ShowSpatial, Converter={StaticResource Visible}}"/>
+              <local:EqView Grid.Row="1" Eq="{Binding Selected.Eq, Mode=TwoWay}" SampleRate="{Binding SampleRate}" SelectedBand="{Binding EqBandIndex, Mode=TwoWay}" IsEnabled="{Binding CanEditSelected}" MinHeight="0" Focusable="True" AutomationProperties.Name="Track EQ response" Visibility="{Binding ShowEq, Converter={StaticResource Visible}}"/>
+              <Grid Grid.Row="2" Margin="0,10,0,0" IsEnabled="{Binding CanEditSelected}" Visibility="{Binding ShowEq, Converter={StaticResource Visible}}">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <StackPanel Grid.ColumnSpan="5" Orientation="Horizontal" Margin="0,0,0,6">
+                  <ComboBox ItemsSource="{Binding EqBandNames}" SelectedIndex="{Binding EqBandIndex}" Width="118" AutomationProperties.Name="EQ band" Margin="0,0,12,0"/>
+                  <CheckBox Content="On" IsChecked="{Binding BandOn}" VerticalAlignment="Center" AutomationProperties.Name="EQ band on"/>
+                  <TextBlock Text="{Binding BandText}" VerticalAlignment="Center" FontFamily="Consolas" FontSize="11" Foreground="{StaticResource Accent}"/>
+                </StackPanel>
+                <TextBlock Grid.Row="1" Text="FREQUENCY" Style="{StaticResource Label}" Margin="0"/>
+                <Slider Grid.Row="2" Value="{Binding BandFrequencyLog}" Minimum="1.30103" Maximum="4.30103" SmallChange=".02" LargeChange=".1" IsSnapToTickEnabled="False" AutomationProperties.Name="EQ band frequency" AutomationProperties.HelpText="{Binding BandText}" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="GAIN" Style="{StaticResource Label}" Margin="0"/>
+                <Slider Grid.Row="2" Grid.Column="2" Value="{Binding BandGainDb}" Minimum="-24" Maximum="24" TickFrequency=".5" SmallChange=".5" LargeChange="3" IsEnabled="{Binding BandHasGain}" AutomationProperties.Name="EQ band gain" AutomationProperties.HelpText="{Binding BandText}" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="4" Text="Q · WHEEL ON GRAPH" Style="{StaticResource Label}" Margin="0"/>
+                <Slider Grid.Row="2" Grid.Column="4" Value="{Binding BandQLog}" Minimum="-1" Maximum="1" SmallChange=".02" LargeChange=".1" IsSnapToTickEnabled="False" IsEnabled="{Binding BandHasQ}" AutomationProperties.Name="EQ band Q" AutomationProperties.HelpText="{Binding BandText}" Margin="0,4,0,0"/>
+              </Grid>
             </Grid>
           </Border>
           <Border Grid.Column="2" Style="{StaticResource Card}">

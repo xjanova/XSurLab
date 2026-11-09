@@ -73,7 +73,7 @@ public sealed class StreamingMixer
                 : [SpatialMixer.Pan(Layout, t.Azimuth - 30, t.Elevation, t.Spread), SpatialMixer.Pan(Layout, t.Azimuth + 30, t.Elevation, t.Spread)]);
             routes = routes.Select(route => route.Select(g => g * gain).ToArray()).ToArray();
             double lfe = lfeChannel < 0 || state.Bed is not null ? 0 : gain * Gain(t.LfeDb);
-            return new TrackParameters(routes, lfe, gain > 0);
+            return new TrackParameters(routes, lfe, gain > 0, t.Eq.Design(SampleRate));
         }).ToArray();
         return new Parameters(tracks, Gain(session.MasterGainDb));
     }
@@ -125,7 +125,7 @@ public sealed class StreamingMixer
 
     private sealed record Parameters(TrackParameters[] Tracks, double Master);
     // Routes[source channel][output channel] holds pan or bed routing × track gain; all zero when muted or not soloed.
-    private sealed record TrackParameters(double[][] Routes, double Lfe, bool Audible);
+    private sealed record TrackParameters(double[][] Routes, double Lfe, bool Audible, Biquad[] Eq);
 
     private sealed class TrackState
     {
@@ -134,6 +134,7 @@ public sealed class StreamingMixer
         private readonly double[] source;
         private readonly long offset;
         private readonly LowPass filter;
+        private readonly Equalizer eq;
         private readonly double[][] current, steps;
         private TrackParameters target = null!;
         private double lfe, lfeStep;
@@ -150,6 +151,7 @@ public sealed class StreamingMixer
             source = new double[media.Channels];
             offset = (long)Math.Round(track.Settings.StartSeconds * rate);
             filter = new LowPass(rate);
+            eq = new Equalizer(media.Channels);
             if (media.Channels > 2) Bed = SpatialMixer.Bits(media.ChannelMask).Select(bit => SpatialMixer.Route(layout, bit)).ToArray();
             current = Enumerable.Range(0, media.Channels).Select(_ => new double[outputs]).ToArray();
             steps = Enumerable.Range(0, media.Channels).Select(_ => new double[outputs]).ToArray();
@@ -159,6 +161,7 @@ public sealed class StreamingMixer
             target = p;
             for (int s = 0; s < current.Length; s++) p.Routes[s].CopyTo(current[s], 0);
             lfe = p.Lfe; silent = !p.Audible;
+            eq.Reset(p.Eq);
         }
         public void Retarget(TrackParameters p, int frames)
         {
@@ -166,6 +169,7 @@ public sealed class StreamingMixer
             for (int s = 0; s < current.Length; s++)
                 for (int c = 0; c < current[s].Length; c++) steps[s][c] = (p.Routes[s][c] - current[s][c]) / frames;
             lfeStep = (p.Lfe - lfe) / frames;
+            eq.Retarget(p.Eq, frames);
             silent = false;
         }
         public void Step(bool last)
@@ -174,6 +178,7 @@ public sealed class StreamingMixer
             for (int s = 0; s < current.Length; s++)
                 for (int c = 0; c < current[s].Length; c++) current[s][c] += steps[s][c];
             lfe += lfeStep;
+            eq.Step();
         }
         public void Add(long frame, double[] output, int lfeChannel)
         {
@@ -181,7 +186,8 @@ public sealed class StreamingMixer
             if (local < 0) return;
             if (resampler is null) for (int s = 0; s < source.Length; s++) source[s] = audio.At(local, s);
             else resampler.Read(audio, local * resampler.Ratio, source);
-            // The low-pass history runs even while muted so a live LFE or unmute has no filter start-up transient.
+            eq.Process(source);
+            // EQ and low-pass history run even while muted so a live LFE or unmute has no filter start-up transient.
             double bass = Bed is null ? filter.Process(source.Length == 2 ? (source[0] + source[1]) * .5 : source[0]) : 0;
             if (silent) return;
             for (int s = 0; s < source.Length; s++)

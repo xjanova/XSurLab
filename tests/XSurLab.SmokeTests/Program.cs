@@ -141,6 +141,46 @@ try
             for (int c = 0; c < expected.Length; c++) Near(actual[c], expected[c]);
         }
     });
+    Test("EQ bands match the RBJ responses, stay exact when flat and ramp live changes", () =>
+    {
+        const int rate = 48000;
+        var peak = Biquad.Design(EqBandKind.Peak, new(true, 1000, 6, 1), rate);
+        Near(peak.MagnitudeDb(1000, rate), 6, 1e-9); Near(peak.MagnitudeDb(20, rate), 0, .02);
+        var hpf = Biquad.Design(EqBandKind.HighPass, new(true, 100), rate);
+        Near(hpf.MagnitudeDb(100, rate), -3.01, .01); Check(hpf.MagnitudeDb(25, rate) < -23, "12 dB/oct below the corner");
+        Near(Biquad.Design(EqBandKind.LowPass, new(true, 5000), rate).MagnitudeDb(5000, rate), -3.01, .01);
+        var low = Biquad.Design(EqBandKind.LowShelf, new(true, 200, 4), rate);
+        Near(low.MagnitudeDb(20, rate), 4, .1); Near(low.MagnitudeDb(200, rate), 2, .01); Near(low.MagnitudeDb(10000, rate), 0, .05);
+        var high = Biquad.Design(EqBandKind.HighShelf, new(true, 4000, -6), rate);
+        Near(high.MagnitudeDb(20000, rate), -6, .3); Near(high.MagnitudeDb(4000, rate), -3, .01); Near(high.MagnitudeDb(100, rate), 0, .05);
+        Check(Biquad.Design(EqBandKind.Peak, new(true, 1000, 0, 1), rate).IsIdentity && Biquad.Design(EqBandKind.HighPass, new(false, 100), rate).IsIdentity,
+            "Flat and bypassed bands are exact identities");
+        var top = Biquad.Design(EqBandKind.LowPass, new(true, 20000, 0, 10), 44100);
+        Check(Math.Abs(top.A2) < 1 && Math.Abs(top.A1) < 1 + top.A2, "A corner above 0.45 × rate is clamped and stays stable");
+        Near(TrackEq.Flat.ResponseDb(1234, rate), 0, 0);
+
+        var tone = new AudioBuffer(rate, 1, Enumerable.Range(0, 9600).Select(i => (float)(.1 * Math.Sin(2 * Math.PI * 1000 * i / rate))).ToArray());
+        var plain = Track("eq.wav");
+        var boosted = plain with { Eq = TrackEq.Flat with { Peak1 = new(true, 1000, 6, 1) } };
+        var neutral = plain with { Eq = TrackEq.Flat with { Peak1 = new(true, 1000, 0, 1), LowShelf = new(true, 100, 0) } };
+        double[] Mix(TrackSettings t)
+        {
+            var m = new StreamingMixer(Session(SpeakerLayout.Stereo, t), [new(t, tone)]);
+            var o = new double[m.TotalFrames * 2]; m.Read(o); return o;
+        }
+        var dry = Mix(plain);
+        Check(dry.SequenceEqual(Mix(neutral)), "0 dB bands must not touch samples");
+        var wet = Mix(boosted);
+        double Rms(double[] s) => Math.Sqrt(s.Skip(4800 * 2).Where((_, i) => i % 2 == 0).Average(v => v * v));
+        Near(20 * Math.Log10(Rms(wet) / Rms(dry)), 6, .05);
+
+        var live = new StreamingMixer(Session(SpeakerLayout.Stereo, plain), [new(plain, tone)]);
+        var before = new double[4800 * 2]; live.Read(before);
+        live.Update(Session(SpeakerLayout.Stereo, boosted));
+        var after = new double[live.RampFrames * 4 * 2]; live.Read(after);
+        for (int f = 0; f < 10; f++) Near(after[f * 2], dry[(4800 + f) * 2], .002);
+        for (int f = live.RampFrames * 2; f < live.RampFrames * 4; f++) Near(after[f * 2], wet[(4800 + f) * 2], .001);
+    });
     Test("Session v2 stores elevation, spread and height layouts; v1 files still load", () =>
     {
         var v1 = Path.Combine(root, "v1.xsurlab.json");
@@ -152,14 +192,20 @@ try
         var old = SessionStore.Load(v1);
         Equal(old.Version, SessionStore.CurrentVersion); Equal(old.Tracks[0].Elevation, 0d); Equal(old.Tracks[0].Spread, 0d);
         Equal(old.Tracks[0].MediaPath, Path.Combine(root, "old.wav"));
-        var raised = Session(SpeakerLayout.Surround714, Track("lifted.wav") with { Elevation = 30, Spread = 90 });
+        var raised = Session(SpeakerLayout.Surround714, Track("lifted.wav") with
+        {
+            Elevation = 30, Spread = 90, Eq = TrackEq.Flat with { HighPass = new(true, 90, 0, .9), Peak2 = new(true, 2500, -3.5, 2.2) }
+        });
         var saved = Path.Combine(root, "v2.xsurlab.json"); SessionStore.Save(saved, raised);
         var json = File.ReadAllText(saved);
-        Check(json.Contains("\"Version\": 2") && json.Contains("\"Surround714\"") && json.Contains("\"Spread\": 90"), "v2 is written with the new fields");
+        Check(json.Contains("\"Version\": 2") && json.Contains("\"Surround714\"") && json.Contains("\"Spread\": 90") && json.Contains("\"Peak2\""), "v2 is written with the new fields");
         Equal(SessionStore.Load(saved).Tracks.Single(), raised.Tracks.Single());
         Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Tracks = [raised.Tracks[0] with { Elevation = 91 }] }));
         Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Tracks = [raised.Tracks[0] with { Spread = -1 }] }));
         Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Version = 3 }));
+        var eq = raised.Tracks[0].Eq;
+        foreach (var bad in new[] { eq with { Peak1 = new(true, 10) }, eq with { Peak1 = new(true, 1000, 30) }, eq with { LowPass = new(true, 9000, 0, 0) }, null! })
+            Throws<InvalidDataException>(() => SessionStore.Validate(raised with { Tracks = [raised.Tracks[0] with { Eq = bad }] }));
     });
     Test("5.1 / 7.1 exports carry the mask, byte count and center channel in order", () =>
     {
@@ -303,7 +349,11 @@ try
     Test("Streaming is chunk-invariant with mixed rates, offsets and LFE filter history", () =>
     {
         var audio = new AudioBuffer(44100, 2, Enumerable.Range(0, 1800).Select(i => (float)(.1 * Math.Sin(i * .071))).ToArray());
-        var track = Track("stream.wav") with { LfeDb = -3, StartSeconds = .001, Azimuth = 93 };
+        var track = Track("stream.wav") with
+        {
+            LfeDb = -3, StartSeconds = .001, Azimuth = 93, Elevation = 20, Spread = 40,
+            Eq = TrackEq.Flat with { HighPass = new(true, 60), Peak1 = new(true, 700, 6, 2), HighShelf = new(true, 6000, -4) }
+        };
         foreach (var layout in Enum.GetValues<SpeakerLayout>())
         foreach (bool stereo in new[] { false, true })
         {

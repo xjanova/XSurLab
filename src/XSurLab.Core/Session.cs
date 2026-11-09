@@ -16,6 +16,7 @@ public sealed record TrackSettings
     public double Elevation { get; init; }
     /// <summary>Width in degrees of the arc the source is spread over, 0–360.</summary>
     public double Spread { get; init; }
+public TrackEq Eq { get; init; } = TrackEq.Flat;
     public double LfeDb { get; init; } = -60;
     public double StartSeconds { get; init; }
     public bool Mute { get; init; }
@@ -40,7 +41,7 @@ public static class SessionStore
         Converters = { new JsonStringEnumConverter<SpeakerLayout>(allowIntegerValues: false) }
     };
 
-    /// <summary>2 adds elevation, spread and the 5.1.4 / 7.1.4 layouts. Version 1 files load with both at 0.</summary>
+    /// <summary>2 adds elevation, spread, the track EQ and the 5.1.4 / 7.1.4 layouts. Version 1 files load flat and at ear level.</summary>
     public const int CurrentVersion = 2;
 
     public static void Validate(SessionDocument session)
@@ -66,6 +67,14 @@ public static class SessionStore
             Range(track.Azimuth, -180, 180, "Azimuth");
             Range(track.Elevation, 0, 90, "Elevation");
             Range(track.Spread, 0, 360, "Spread");
+            if (track.Eq is null) throw new InvalidDataException("Each track needs an EQ (use the flat EQ).");
+            for (int b = 0; b < TrackEq.Count; b++)
+            {
+                var band = track.Eq.Band(b) ?? throw new InvalidDataException($"EQ {TrackEq.Names[b]} is missing.");
+                Range(band.Frequency, 20, 20000, $"EQ {TrackEq.Names[b]} frequency");
+                Range(band.GainDb, -24, 24, $"EQ {TrackEq.Names[b]} gain");
+                Range(band.Q, .1, 10, $"EQ {TrackEq.Names[b]} Q");
+            }
             Range(track.LfeDb, -60, 0, "LFE send");
             Range(track.StartSeconds, 0, 3600, "Start offset");
         }
