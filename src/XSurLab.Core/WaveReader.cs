@@ -4,21 +4,16 @@ namespace XSurLab.Core;
 
 public sealed class AudioBuffer(int sampleRate, int channels, float[] samples)
 {
+    private readonly float[] data = samples;
     public int SampleRate { get; } = sampleRate;
     public int Channels { get; } = channels;
-    public ReadOnlyMemory<float> Samples { get; } = samples;
-    public int Frames => Samples.Length / Channels;
+    public ReadOnlyMemory<float> Samples => data;
+    public int Frames => data.Length / Channels;
     public double Duration => (double)Frames / SampleRate;
 
-    public float Sample(double frame, int channel)
-    {
-        if (frame < 0 || frame >= Frames) return 0;
-        var left = (int)frame;
-        var right = Math.Min(left + 1, Frames - 1);
-        var data = Samples.Span;
-        return (float)(data[left * Channels + channel] * (1 - (frame - left))
-                     + data[right * Channels + channel] * (frame - left));
-    }
+    public float this[long frame, int channel] => data[frame * Channels + channel];
+    /// <summary>Sample value, or silence before the first and after the last frame.</summary>
+    public float At(long frame, int channel) => frame >= 0 && frame < Frames ? data[frame * Channels + channel] : 0;
 }
 
 public static class WaveReader

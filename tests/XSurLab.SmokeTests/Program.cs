@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using XSurLab.Core;
 
 var root = Path.Combine(Path.GetTempPath(), "XSurLab-tests-" + Guid.NewGuid().ToString("N"));
@@ -141,7 +141,31 @@ try
         Equal(result.Frames, 480L);
         var audio = WaveReader.Read(path);
         Equal(audio.SampleRate, 48000); Equal(audio.Channels, 2); Near(audio.Duration, .01);
-        Near(audio.Samples.Span[0], .25 * Math.Sqrt(.5), .00004);
+        Near(audio[240, 0], .25 * Math.Sqrt(.5), .00004);
+    });
+    Test("Windowed-sinc rate conversion tracks a 1 kHz tone within -80 dB", () =>
+    {
+        var tone = new AudioBuffer(44100, 1, Enumerable.Range(0, 44100).Select(i => (float)(.5 * Math.Sin(2 * Math.PI * 1000 * i / 44100))).ToArray());
+        var resampler = new Resampler(44100, 48000); var value = new double[1]; double worst = 0;
+        for (int n = 200; n < 47800; n++)
+        {
+            resampler.Read(tone, n * resampler.Ratio, value);
+            worst = Math.Max(worst, Math.Abs(value[0] - .5 * Math.Sin(2 * Math.PI * 1000 * n / 48000d)));
+        }
+        Console.WriteLine($"  1 kHz 44.1→48 kHz worst error {20 * Math.Log10(worst / .5):F1} dB");
+        Check(worst < .5e-4, "Tone error must stay below -80 dB");
+    });
+    Test("Downsampling removes content above the new Nyquist limit and keeps DC exact", () =>
+    {
+        var high = new AudioBuffer(96000, 1, Enumerable.Range(0, 96000).Select(i => (float)(.5 * Math.Sin(2 * Math.PI * 30000 * i / 96000))).ToArray());
+        var resampler = new Resampler(96000, 48000); var value = new double[1]; double energy = 0;
+        for (int n = 200; n < 47800; n++) { resampler.Read(high, n * resampler.Ratio, value); energy += value[0] * value[0]; }
+        double rms = Math.Sqrt(energy / 47600), reference = .5 / Math.Sqrt(2);
+        Console.WriteLine($"  30 kHz 96→48 kHz residue {20 * Math.Log10(rms / reference):F1} dB");
+        Check(rms < reference * 1e-4, "Alias residue must stay below -80 dB");
+        var dc = new AudioBuffer(44100, 2, Enumerable.Repeat(.25f, 8820).ToArray());
+        var pair = new double[2]; new Resampler(44100, 48000).Read(dc, 2000.37, pair);
+        Near(pair[0], .25, 1e-9); Near(pair[1], .25, 1e-9);
     });
     Test("Clipping, cancellation and source overwrite preserve destination and clean scratch", () =>
     {

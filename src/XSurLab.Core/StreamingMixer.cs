@@ -123,7 +123,8 @@ public sealed class StreamingMixer
     private sealed class TrackState
     {
         private readonly AudioBuffer audio;
-        private readonly double ratio;
+        private readonly Resampler? resampler;
+        private readonly double[] source;
         private readonly long offset;
         private readonly LowPass filter;
         private readonly double[] left, right, leftStep, rightStep;
@@ -134,7 +135,8 @@ public sealed class StreamingMixer
         public TrackState(LoadedTrack track, int rate, int channels)
         {
             audio = track.Audio;
-            ratio = (double)audio.SampleRate / rate;
+            resampler = audio.SampleRate == rate ? null : new Resampler(audio.SampleRate, rate);
+            source = new double[audio.Channels];
             offset = (long)Math.Round(track.Settings.StartSeconds * rate);
             filter = new LowPass(rate);
             left = new double[channels]; right = new double[channels];
@@ -165,10 +167,15 @@ public sealed class StreamingMixer
         }
         public void Add(long frame, double[] output, int lfeChannel)
         {
-            double source = (frame - offset) * ratio;
-            if (source < 0) return;
-            double a = audio.Sample(source, 0);
-            double b = IsStereo ? audio.Sample(source, 1) : 0;
+            long local = frame - offset;
+            if (local < 0) return;
+            double a, b;
+            if (resampler is null) { a = audio.At(local, 0); b = IsStereo ? audio.At(local, 1) : 0; }
+            else
+            {
+                resampler.Read(audio, local * resampler.Ratio, source);
+                a = source[0]; b = IsStereo ? source[1] : 0;
+            }
             // The low-pass history runs even while muted so a live LFE or unmute has no filter start-up transient.
             double bass = filter.Process(IsStereo ? (a + b) * .5 : a);
             if (silent) return;
