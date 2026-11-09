@@ -322,6 +322,98 @@ try
         var invalid = new StreamingMixer(session, [new(track, new AudioBuffer(48000, 1, [float.NaN]))]);
         Throws<InvalidDataException>(() => invalid.Read(new double[6]));
     });
+    Test("K-weighting reproduces the BS.1770 48 kHz coefficients", () =>
+    {
+        var (b1, a1, b2, a2) = LoudnessMeter.KWeighting(48000);
+        double[] published = [1.53512485958697, -2.69169618940638, 1.19839281085285, -1.69065929318241, .73248077421585, -1.99004745483398, .99007225036621];
+        double[] actual = [b1[0], b1[1], b1[2], a1[1], a1[2], a2[1], a2[2]];
+        for (int i = 0; i < published.Length; i++) Near(actual[i], published[i], 1e-8);
+        Check(b2.SequenceEqual(new double[] { 1, -2, 1 }), "RLB numerator must be 1, -2, 1");
+    });
+    Test("Integrated loudness matches EBU Tech 3341 cases within 0.1 LU", () =>
+    {
+        double[] Pair(double db) => [db, db];
+        var results = new (string Name, double Lufs, double Expected)[]
+        {
+            ("1 kHz -23 dBFS 48 kHz", Measure(48000, SpeakerLayout.Stereo, (20, Pair(-23))).Integrated, -23),
+            ("1 kHz -23 dBFS 44.1 kHz", Measure(44100, SpeakerLayout.Stereo, (20, Pair(-23))).Integrated, -23),
+            ("1 kHz -23 dBFS 96 kHz", Measure(96000, SpeakerLayout.Stereo, (20, Pair(-23))).Integrated, -23),
+            ("1 kHz -33 dBFS", Measure(48000, SpeakerLayout.Stereo, (20, Pair(-33))).Integrated, -33),
+            ("-36/-23/-36 relative gate", Measure(48000, SpeakerLayout.Stereo, (10, Pair(-36)), (60, Pair(-23)), (10, Pair(-36))).Integrated, -23),
+            ("-72/-36/-23/-36/-72 both gates", Measure(48000, SpeakerLayout.Stereo, (10, Pair(-72)), (10, Pair(-36)), (60, Pair(-23)), (10, Pair(-36)), (10, Pair(-72))).Integrated, -23),
+            ("5.0 L/R -28, C -24, Ls/Rs -30", Measure(48000, SpeakerLayout.Surround51, (20, [-28, -28, -24, double.NegativeInfinity, -30, -30])).Integrated, -23),
+        };
+        foreach (var (name, lufs, expected) in results)
+        {
+            Console.WriteLine($"  {name}: {lufs:F2} LUFS");
+            Near(lufs, expected, .1);
+        }
+    });
+    Test("Loudness range matches EBU Tech 3342 cases within 1 LU", () =>
+    {
+        double[] Pair(double db) => [db, db];
+        foreach (var (low, high, expected) in new[] { (-30d, -20d, 10d), (-20d, -15d, 5d), (-40d, -20d, 20d) })
+        {
+            double range = Measure(48000, SpeakerLayout.Stereo, (20, Pair(high)), (20, Pair(low))).Range;
+            Console.WriteLine($"  {high}/{low} dBFS: LRA {range:F2} LU");
+            Near(range, expected, 1);
+        }
+        double steps = Measure(48000, SpeakerLayout.Stereo, (20, Pair(-50)), (20, Pair(-35)), (20, Pair(-20)), (20, Pair(-35)), (20, Pair(-50))).Range;
+        Console.WriteLine($"  -50/-35/-20/-35/-50 dBFS: LRA {steps:F2} LU");
+        Near(steps, 15, 1);
+    });
+    Test("True peak catches inter-sample peaks within +0.2/-0.4 dB", () =>
+    {
+        double worst = 0, largestGap = 0;
+        foreach (int divisor in new[] { 4, 6, 8 })
+        for (double phase = 0; phase < 90; phase += 7.5)
+        {
+            var meter = new LoudnessMeter(48000, SpatialMixer.Speakers(SpeakerLayout.Stereo));
+            // A 10 ms fade-in keeps the reconstruction overshoot of an abrupt onset out of the steady-state check.
+            var block = Enumerable.Range(0, 4800).SelectMany(n =>
+            {
+                double fade = n < 480 ? .5 - .5 * Math.Cos(Math.PI * n / 480) : 1;
+                double v = .5 * fade * Math.Sin(2 * Math.PI * n / divisor + phase * Math.PI / 180);
+                return new[] { v, v };
+            }).ToArray();
+            meter.Process(block);
+            var report = meter.Report();
+            double error = report.TruePeakDb - 20 * Math.Log10(.5);
+            Check(error is <= .2 and >= -.4, $"fs/{divisor} at {phase}° reads {error:F2} dB from the true peak");
+            worst = Math.Abs(error) > Math.Abs(worst) ? error : worst;
+            largestGap = Math.Max(largestGap, report.TruePeakDb - report.SamplePeakDb);
+        }
+        Console.WriteLine($"  worst true-peak error {worst:F2} dB; largest gap above sample peak {largestGap:F2} dB");
+        // fs/4 at 45° puts the crest half-way between samples (3.01 dB above them); 4× phases land within 11.25° (−0.17 dB).
+        Check(largestGap > 2.8, "fs/4 at 45° must read close to 3 dB above its sample peak");
+    });
+    Test("LFE is excluded from loudness and silence reads minus infinity", () =>
+    {
+        var lfeOnly = Measure(48000, SpeakerLayout.Surround51, (5, [double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity, -10, double.NegativeInfinity, double.NegativeInfinity]));
+        Check(double.IsNegativeInfinity(lfeOnly.Integrated), "LFE alone must not register loudness");
+        Near(lfeOnly.ChannelPeaks[3], Math.Pow(10, -.5), 1e-6);
+        var silent = new LoudnessMeter(48000, SpatialMixer.Speakers(SpeakerLayout.Stereo));
+        silent.Process(new double[96000]);
+        Check(double.IsNegativeInfinity(silent.Report().Integrated) && silent.Report().Range == 0, "Silence must not register loudness");
+    });
+    Test("Meter results and mixer metering do not depend on block size", () =>
+    {
+        var signal = Enumerable.Range(0, 48000 * 6 * 2).Select(i => .3 * Math.Sin(i * .013) * Math.Sin(i * .00007)).ToArray();
+        var speakers = SpatialMixer.Speakers(SpeakerLayout.Surround51);
+        var a = new LoudnessMeter(48000, speakers); a.Process(signal);
+        var b = new LoudnessMeter(48000, speakers);
+        for (int i = 0; i < signal.Length; i += 6 * 997) b.Process(signal.AsSpan(i, Math.Min(6 * 997, signal.Length - i)));
+        var x = a.Report(); var y = b.Report();
+        Equal(x.Integrated, y.Integrated); Equal(x.Range, y.Range); Equal(x.TruePeak, y.TruePeak); Equal(a.Frames, 96000L);
+        var media = new AudioBuffer(48000, 1, Enumerable.Range(0, 48000).Select(i => (float)(.2 * Math.Sin(i * .1))).ToArray());
+        var track = Track("metered.wav"); var session = Session(SpeakerLayout.Surround51, track);
+        var mixer = new StreamingMixer(session, [new(track, media)]);
+        mixer.Read(new double[mixer.TotalFrames * 6]);
+        var path = Path.Combine(root, "metered-out.wav");
+        var result = WaveRenderer.Render(path, session, [new(track, media)]);
+        Equal(result.Loudness.Integrated, mixer.Meter.Report().Integrated);
+        Check(double.IsFinite(result.Loudness.Integrated) && mixer.Meter.Latest is { Frames: 48000 }, "Render and mixer must report the same measurement");
+    });
 }
 finally { Directory.Delete(root, recursive: true); }
 Console.WriteLine($"{count - failures}/{count} checks passed.");
@@ -340,6 +432,29 @@ void Throws<T>(Action action) where T : Exception
 {
     try { action(); } catch (T) { return; }
     throw new Exception($"Expected {typeof(T).Name}.");
+}
+LoudnessReport Measure(int rate, SpeakerLayout layout, params (double Seconds, double[] Db)[] parts)
+{
+    var speakers = SpatialMixer.Speakers(layout);
+    var meter = new LoudnessMeter(rate, speakers, measureTruePeak: false);
+    var block = new double[4800 * speakers.Length];
+    long n = 0;
+    foreach (var (seconds, db) in parts)
+    {
+        var gains = db.Select(d => double.IsNegativeInfinity(d) ? 0 : Math.Pow(10, d / 20)).ToArray();
+        long end = n + (long)Math.Round(seconds * rate);
+        while (n < end)
+        {
+            int frames = (int)Math.Min(4800, end - n);
+            for (int f = 0; f < frames; f++, n++)
+            {
+                double s = Math.Sin(2 * Math.PI * 1000 * n / rate);
+                for (int c = 0; c < speakers.Length; c++) block[f * speakers.Length + c] = gains[c] * s;
+            }
+            meter.Process(block.AsSpan(0, frames * speakers.Length));
+        }
+    }
+    return meter.Report();
 }
 TrackSettings Track(string name) => new() { MediaPath = Path.Combine(root, name), Name = name };
 SessionDocument Session(SpeakerLayout layout, params TrackSettings[] tracks) => new() { Layout = layout, MasterGainDb = 0, Tracks = tracks.ToList() };

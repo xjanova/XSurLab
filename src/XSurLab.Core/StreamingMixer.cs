@@ -20,6 +20,8 @@ public sealed class StreamingMixer
     public double Peak { get; private set; }
     /// <summary>Frames over which a live parameter change moves from the old to the new value.</summary>
     public int RampFrames { get; }
+    /// <summary>Loudness and peaks of everything read so far, measured on the mixer output.</summary>
+    public LoudnessMeter Meter { get; }
 
     public StreamingMixer(SessionDocument session, IReadOnlyList<LoadedTrack> tracks, bool stereoMonitor = false)
     {
@@ -42,6 +44,7 @@ public sealed class StreamingMixer
         lfeChannel = Array.FindIndex(speakers, s => s.IsLfe);
         states = tracks.Select(t => new TrackState(t, SampleRate, speakers.Length)).ToArray();
         mix = new double[speakers.Length];
+        Meter = new LoudnessMeter(SampleRate, stereoMonitor ? SpatialMixer.Speakers(SpeakerLayout.Stereo) : speakers);
         parameters = active = Prepare(session);
         master = active.Master;
         for (int i = 0; i < states.Length; i++) states[i].Reset(active.Tracks[i]);
@@ -99,6 +102,7 @@ public sealed class StreamingMixer
             }
             Position++;
         }
+        Meter.Process(destination[..(frames * Channels)]);
         return frames;
     }
 

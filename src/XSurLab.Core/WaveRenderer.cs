@@ -1,9 +1,9 @@
-﻿using System.Text;
+using System.Text;
 
 namespace XSurLab.Core;
 
 public sealed record LoadedTrack(TrackSettings Settings, AudioBuffer Audio);
-public sealed record RenderResult(long Frames, int Channels, int SampleRate, double Peak)
+public sealed record RenderResult(long Frames, int Channels, int SampleRate, double Peak, LoudnessReport Loudness)
 {
     public double PeakDb => Peak > 0 ? 20 * Math.Log10(Peak) : double.NegativeInfinity;
     public double Duration => (double)Frames / SampleRate;
@@ -55,7 +55,7 @@ public static class WaveRenderer
                 throw new InvalidOperationException($"Render peaks at {20 * Math.Log10(peak):F1} dBFS. Lower track or master gain and retry. No output was replaced.");
             File.Move(temporary, destination, overwrite: true);
             progress?.Report(1);
-            return new RenderResult(frames, channels, rate, peak);
+            return new RenderResult(frames, channels, rate, peak, mixer.Meter.Report());
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

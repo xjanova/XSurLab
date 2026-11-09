@@ -1,6 +1,6 @@
 ﻿namespace XSurLab.Core;
 
-public sealed record Speaker(string Name, double Azimuth, bool IsLfe = false);
+public sealed record Speaker(string Name, double Azimuth, bool IsLfe = false, double Elevation = 0);
 
 public static class SpatialMixer
 {
