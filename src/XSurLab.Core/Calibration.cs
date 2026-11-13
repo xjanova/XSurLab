@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 namespace XSurLab.Core;
 
 /// <summary>Level and time alignment of one loudspeaker. Positive delay holds a nearer speaker back so all arrive together.</summary>
-public sealed record SpeakerTrim(string Speaker, double TrimDb = 0, double DelayMs = 0);
+public sealed record SpeakerTrim(string Speaker, double TrimDb = 0, double DelayMs = 0, bool Small = true);
 
 /// <summary>
 /// How one output plays one layout in this room. It applies to the monitor only: exports and deliveries never pass through it.
@@ -21,7 +21,7 @@ public sealed record SpeakerCalibration
     public SpeakerLayout Layout { get; init; } = SpeakerLayout.Surround51;
     /// <summary>One entry per speaker of the layout, in WAVE channel order.</summary>
     public List<SpeakerTrim> Speakers { get; init; } = [];
-    /// <summary>High-passes every main speaker at the crossover and sends the low end, with LFE, to the subwoofer.</summary>
+    /// <summary>High-passes Small speakers at the crossover and sends their low end, with LFE, to the subwoofer.</summary>
     public bool BassManagement { get; init; }
     public int CrossoverHz { get; init; } = 80;
     /// <summary>The +10 dB in-band gain mixes expect on LFE. Used only with bass management, where the sub is set to match the mains.</summary>
@@ -71,7 +71,7 @@ public sealed record CalibrationFile
 
 public static class CalibrationStore
 {
-    public const int CurrentVersion = 1, MaxProfiles = 256;
+    public const int CurrentVersion = 2, MaxProfiles = 256;
     private static readonly JsonSerializerOptions Options = new()
     {
         WriteIndented = true,
@@ -105,7 +105,7 @@ public static class CalibrationStore
 
     public static void Validate(CalibrationFile file)
     {
-        if (file is null || file.Version != CurrentVersion) throw new InvalidDataException($"Unsupported calibration version. This build reads version {CurrentVersion}.");
+        if (file is null || file.Version is not (1 or CurrentVersion)) throw new InvalidDataException($"Unsupported calibration version. This build reads versions 1 and {CurrentVersion}.");
         if (file.Profiles is null || file.Profiles.Count > MaxProfiles) throw new InvalidDataException($"A calibration file holds up to {MaxProfiles} profiles.");
         HashSet<(string, SpeakerLayout)> seen = [];
         foreach (var profile in file.Profiles)
@@ -124,7 +124,7 @@ public static class CalibrationStore
         try { file = JsonSerializer.Deserialize<CalibrationFile>(File.ReadAllText(path), Options); }
         catch (JsonException ex) { throw new InvalidDataException("Calibration file is not valid JSON: " + ex.Message, ex); }
         Validate(file ?? throw new InvalidDataException("Empty calibration file."));
-        return file;
+        return file with { Version = CurrentVersion };
     }
 
     /// <summary>
@@ -151,7 +151,7 @@ public static class CalibrationStore
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(temporary, JsonSerializer.Serialize(file, Options));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(file with { Version = CurrentVersion }, Options));
             if (File.Exists(path)) File.Replace(temporary, path, path + ".bak", ignoreMetadataErrors: true);
             else File.Move(temporary, path);
         }

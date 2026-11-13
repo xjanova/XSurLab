@@ -46,7 +46,7 @@ public partial class CalibrationWindow : Window, INotifyPropertyChanged
     public int CrossoverHz { get => crossover; set { crossover = value; Changed(); Changed(nameof(BassHint)); Publish(); } }
     public bool LfeGain { get => lfeGain; set { lfeGain = value; Changed(); Changed(nameof(BassHint)); Publish(); } }
     public string BassHint => !CanBassManage ? "Bass management needs a layout with a subwoofer; stereo fold-down has none."
-        : bass ? $"Mains roll off below {crossover} Hz at 24 dB/oct into the subwoofer. "
+        : bass ? $"Small speakers roll off below {crossover} Hz at 24 dB/oct into the subwoofer; Large speakers keep their full range. "
             + (lfeGain ? "LFE +10 dB is added here, so trim the subwoofer to read the same as the mains." : "LFE is not boosted, so set the subwoofer to read 10 dB above the mains.")
             + " Test noise skips bass management so each speaker is measured on its own."
         : "Bass management off: every channel goes to its own speaker and LFE is not boosted, so set the subwoofer (its trim or its own level) to read 10 dB above the mains.";
@@ -69,7 +69,7 @@ public partial class CalibrationWindow : Window, INotifyPropertyChanged
         this.output = output; this.mode = mode; this.layout = layout; this.sampleRate = sampleRate; this.monitorVolume = monitorVolume;
         Stopped = released;
         var speakers = SpatialMixer.Speakers(layout);
-        Speakers = speakers.Select((s, i) => new SpeakerRow(i, s, calibration.Speakers[i], Publish)).ToArray();
+        Speakers = speakers.Select((s, i) => new SpeakerRow(i, s, calibration.Speakers[i], Publish, SpeakerCalibration.CanBassManage(layout))).ToArray();
         order = TestSignal.Order(layout);
         CanBassManage = SpeakerCalibration.CanBassManage(layout);
         bass = calibration.BassManagement && CanBassManage; crossover = calibration.CrossoverHz; lfeGain = calibration.LfeGain;
@@ -87,7 +87,7 @@ public partial class CalibrationWindow : Window, INotifyPropertyChanged
     private SpeakerCalibration Build() => new()
     {
         DeviceId = output.Id, DeviceName = output.Name.Length > 256 ? output.Name[..256] : output.Name, Layout = layout,
-        Speakers = Speakers.Select(s => new SpeakerTrim(s.Name, s.TrimDb, s.DelayMs)).ToList(),
+        Speakers = Speakers.Select(s => new SpeakerTrim(s.Name, s.TrimDb, s.DelayMs, s.Small)).ToList(),
         BassManagement = bass, CrossoverHz = crossover, LfeGain = lfeGain
     };
     private void Publish() { if (chain is not null) chain.Update(Build()); }
@@ -187,7 +187,7 @@ public partial class CalibrationWindow : Window, INotifyPropertyChanged
 
     private void Reset_Click(object sender, RoutedEventArgs e)
     {
-        if (MessageBox.Show(this, "Set every trim and delay to 0 and turn bass management off?\nCancel in this window still keeps the saved calibration.",
+        if (MessageBox.Show(this, "Set every trim and delay to 0, set mains to Small and turn bass management off?\nCancel in this window still keeps the saved calibration.",
                 "Reset calibration", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) != MessageBoxResult.Yes) return;
         foreach (var row in Speakers) row.Reset();
         BassManagement = false;
@@ -214,18 +214,24 @@ public sealed class SpeakerRow : INotifyPropertyChanged
     private readonly Action changed;
     private double trim, delay;
     private string distance = "";
-    private bool playing;
+    private bool playing, small;
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public SpeakerRow(int index, Speaker speaker, SpeakerTrim value, Action changed)
+    public SpeakerRow(int index, Speaker speaker, SpeakerTrim value, Action changed, bool canBassManage)
     {
         Index = index; Name = speaker.Name; Description = SpeakerCalibration.Describe(speaker);
-        trim = value.TrimDb; delay = value.DelayMs; this.changed = changed;
+        trim = value.TrimDb; delay = value.DelayMs; small = value.Small; this.changed = changed;
+        IsLfe = speaker.IsLfe; CanSetSize = canBassManage && !IsLfe;
     }
 
     public int Index { get; }
     public string Name { get; }
     public string Description { get; }
+    public bool IsLfe { get; }
+    public bool CanSetSize { get; }
+    public bool Small { get => small; set { if (small == value) return; small = value; Changed(); Changed(nameof(SizeLabel)); changed(); } }
+    public string SizeLabel => small ? "Small" : "Large";
+    public string SizeName => $"Redirect bass of {Description} to the subwoofer";
     public string TestName => $"Test noise on {Description}";
     public string TrimName => $"Trim of {Description}";
     public string DelayName => $"Delay of {Description}";
@@ -246,6 +252,6 @@ public sealed class SpeakerRow : INotifyPropertyChanged
         return parsed && double.IsFinite(metres) && metres is >= 0 and <= 20;
     }
 
-    public void Reset() { TrimDb = 0; DelayMs = 0; }
+    public void Reset() { TrimDb = 0; DelayMs = 0; Small = true; }
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
 }

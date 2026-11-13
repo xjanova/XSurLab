@@ -54,7 +54,9 @@ dotnet run --project src/XSurLab.App
 - เสียงทดสอบ pink noise −20 dBFS RMS ทีละลำโพง: ลำโพงหลัก 500 Hz–2 kHz, sub 20–120 Hz, peak ไม่เกิน −8 dBFS;
   กด Test ทีละตัว หรือ Cycle ไล่ตามเข็มนาฬิกาตัวละ 3 วินาที (sub ท้ายสุด) แล้ววัดด้วย SPL meter ที่จุดนั่งฟัง
 - Trim −20…+10 dB และ delay 0–50 ms ต่อลำโพง ปรับระหว่างเสียงทดสอบดังอยู่ได้; ใส่ระยะห่าง (เมตร) แล้วให้คำนวณ delay ได้
-- Bass management: crossover Linkwitz–Riley 24 dB/oct ที่ 60/80/100/120 Hz ส่งเสียงทุ้มของลำโพงหลักไป sub รวมกับ LFE (+10 dB เลือกได้)
+- Bass management: เลือก **Small/Large** แยกต่อลำโพงหลักและลำโพงเพดาน; Small ใช้ crossover Linkwitz–Riley 24 dB/oct ที่ 60/80/100/120 Hz ส่งเบสไป sub รวมกับ LFE (+10 dB เลือกได้); Large เก็บเสียงเต็มย่าน ไม่ส่งเบสซ้ำไป sub
+- ค่าเริ่มต้นและ calibration เดิมเป็น Small ทุกตัว; การสลับขนาดไล่ค่าใน 20 ms ขณะเล่น เสียงทดสอบข้าม bass management เสมอ
+- Calibration อ่าน schema v1/v2 และบันทึกเป็น v2 พร้อม `.bak` ของไฟล์เดิม; แอปรุ่นเก่าอ่าน v2 ไม่ได้ ต้องใช้รุ่นใหม่นี้ต่อหรือคืนไฟล์ v1 จาก backup
 - ระดับ sub: เปิด bass management และ LFE +10 dB → ตั้ง sub ให้อ่านได้เท่าลำโพงหลัก; ปิด bass management → ตั้ง sub ให้ดังกว่าลำโพงหลัก 10 dB
   (มิกซ์คาดว่า LFE ดังกว่า 10 dB ในย่านของมัน)
 - ใช้กับเสียงฟังเท่านั้น ไม่เข้า export/deliver; สวิตช์ **Apply** สลับ calibrate/flat ระหว่างเล่นได้ (ไล่ค่าใน 20 ms)
@@ -125,7 +127,7 @@ Workspace Routing / Up-Downmix / Monitor ในต้นแบบยังเป
 - Panner เป็น amplitude panner ไม่จำลองระยะทาง ห้อง หรือ HRTF
 - Calibrate ไม่ได้ฟังเสียงจากไมค์เอง: ระดับเสียงต้องอ่านจาก SPL meter และระยะต้องวัดเอง; Shared ผ่านเอฟเฟกต์ของ Windows
   จึงควรปิด room correction/virtual surround ระหว่าง calibrate
-- Bass management ตัดเสียงทุ้มของลำโพงหลักทุกตัว (ยังไม่มีตัวเลือก large/small ต่อลำโพง) และไม่ low-pass ช่อง LFE ซ้ำ;
+- Bass management ตัดเสียงทุ้มเฉพาะลำโพง Small เมื่อเปิดใช้งาน และไม่ low-pass ช่อง LFE ซ้ำ;
   trim บวก หรือ LFE +10 dB อาจทำให้ monitor เกิน 0 dBFS แล้วหยุดเล่น — ลด MONITOR ลง
 - เมื่อเพลงจบ ลำโพงที่ตั้ง delay จะเล่นต่อจนครบ delay; playhead ไม่นับ delay (ไม่เกิน 50 ms)
 - รายงาน QC เทียบเป้าที่เลือก ไม่ใช่การรับรอง DTS หรือมาตรฐานส่งมอบภาพยนตร์
