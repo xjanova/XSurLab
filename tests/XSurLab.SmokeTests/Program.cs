@@ -862,7 +862,82 @@ try
             for (int f = 0; f < reference.Length / 6; f++) Near(o[f * 6 + 3], reference[f * 6 + 3] * gain, 1e-12);
         }
     });
-    Test("Live trim, delay, crossover and bass-management changes ramp without jumps", () =>
+    Test("Large speakers keep full range while Small speakers redirect bass in every surround layout", () =>
+    {
+        foreach (var layout in Enum.GetValues<SpeakerLayout>().Where(SpeakerCalibration.CanBassManage))
+        foreach (int rate in new[] { 44100, 48000, 96000 })
+        {
+            var speakers = SpatialMixer.Speakers(layout);
+            int channels = speakers.Length, sub = Array.FindIndex(speakers, s => s.IsLfe);
+            var small = SpeakerCalibration.Flat(layout) with { BassManagement = true };
+            for (int c = 0; c < channels; c++)
+            {
+                if (c == sub) continue;
+                var large = small with { Speakers = small.Speakers.Select((s, i) => i == c ? s with { Small = false } : s).ToList() };
+                var reference = Drain(Tone(layout, c, 30, .2, rate), 137);
+                var full = Drain(new MonitorChain(Tone(layout, c, 30, .2, rate), layout, large), 137);
+                Check(full.SequenceEqual(reference), $"{layout}/{rate}/{speakers[c].Name}: Large stays bit-exact and sends no bass to sub");
+                var redirected = Drain(new MonitorChain(Tone(layout, c, 30, .2, rate), layout, small), 239);
+                double main = Rms(redirected, channels, f => redirected[f * channels + c]);
+                double bass = Rms(redirected, channels, f => redirected[f * channels + sub]);
+                Check(Db(main / bass) < -25, $"{layout}/{rate}/{speakers[c].Name}: Small sends 30 Hz to sub");
+                var bypassed = Drain(new MonitorChain(Tone(layout, c, 30, .2, rate), layout, small, bypassBassManagement: true), 137);
+                Check(bypassed.SequenceEqual(reference), "Calibration noise bypasses size and bass management");
+            }
+        }
+    });
+    Test("Mixed speaker sizes route only Small bass and keep the independent LFE gain", () =>
+    {
+        var layout = SpeakerLayout.Surround51;
+        var small = SpeakerCalibration.Flat(layout) with { BassManagement = true };
+        var mixed = small with { Speakers = small.Speakers.Select((s, i) => s with { Small = i == 1 }).ToList() };
+        var left = Drain(Tone(layout, 0, 30, .3), 83);
+        var right = Drain(Tone(layout, 1, 47, .3), 113);
+        var lfe = Drain(Tone(layout, 3, 53, .3), 197);
+        var input = left.Zip(right, (l, r) => l + r).Zip(lfe, (m, l) => m + l).ToArray();
+        foreach (bool boost in new[] { false, true })
+        {
+            var output = Drain(new MonitorChain(new Buffered(48000, layout, input), layout, mixed with { LfeGain = boost }), 317);
+            var redirected = Drain(new MonitorChain(Tone(layout, 1, 47, .3), layout, small), 191);
+            double gain = boost ? Math.Sqrt(10) : 1;
+            for (int i = 0; i < input.Length; i++) Near(output[i], left[i] + redirected[i] + lfe[i] * gain, 1e-12);
+        }
+        var off = Drain(new MonitorChain(new Buffered(48000, layout, input), layout, mixed with { BassManagement = false }), 83);
+        Check(off.SequenceEqual(input), "Bass management off ignores all speaker sizes and LFE gain");
+    });
+    Test("Live Small/Large changes ramp for 20 ms with warm filters on mains and sub", () =>
+    {
+        var layout = SpeakerLayout.Surround51;
+        foreach (int rate in new[] { 44100, 48000, 96000 })
+        {
+            var input = Enumerable.Range(0, rate * 6).Select(i => i % 6 == 3 ? .01 : .1).ToArray();
+            var small = SpeakerCalibration.Flat(layout) with { BassManagement = true };
+            var large = small with { Speakers = small.Speakers.Select((s, i) => i == 0 ? s with { Small = false } : s).ToList() };
+            var chain = new MonitorChain(new Buffered(rate, layout, input), layout, small);
+            var warm = new double[rate / 5 * 6];
+            chain.Read(warm);
+            int ramp = (int)Math.Round(rate * StreamingMixer.RampSeconds);
+            foreach (var target in new[] { large, small })
+            {
+                var previous = warm[^6..];
+                chain.Update(target);
+                var transition = new double[(ramp + 5) * 6];
+                chain.Read(transition);
+                for (int f = 0; f < ramp + 5; f++)
+                for (int c = 0; c < 6; c++)
+                {
+                    double value = transition[f * 6 + c];
+                    Check(Math.Abs(value - previous[c]) < .0003, "Size transition has no step on any output");
+                    previous[c] = value;
+                }
+                Near(previous[0], target.Speakers[0].Small ? 0 : .1, 1e-10);
+                Near(previous[1], 0, 1e-10);
+                Near(previous[3], (target.Speakers[0].Small ? .5 : .4) + .01 * Math.Sqrt(10), 1e-10);
+                warm = transition;
+            }
+        }
+    });
+    Test("Live trim, delay, crossover, size and bass-management changes ramp without jumps", () =>
     {
         var layout = SpeakerLayout.Surround51;
         var chain = new MonitorChain(Tone(layout, 0, 100, 3), layout);
@@ -877,7 +952,7 @@ try
             if (i % 45 == 0) crossover = SpeakerCalibration.Crossovers[random.Next(4)];
             chain.Update(SpeakerCalibration.Flat(layout) with
             {
-                Speakers = [new("L", -random.Next(13) / 2d, random.Next(201) / 10d), new("R"), new("C"), new("LFE"), new("Ls"), new("Rs")],
+                Speakers = [new("L", -random.Next(13) / 2d, random.Next(201) / 10d, Small: i % 7 < 3), new("R"), new("C"), new("LFE"), new("Ls"), new("Rs")],
                 BassManagement = managed, CrossoverHz = crossover
             });
             int frames = chain.Read(block);
@@ -974,7 +1049,7 @@ try
         Equal(CalibrationStore.Load(path).Profiles.Count, 0);
         var five = SpeakerCalibration.Flat(SpeakerLayout.Surround51, "{0.0.0.00000000}.{a}", "Speakers") with
         {
-            Speakers = [new("L", -1.5, .25), new("R", 2), new("C", 0, 3.5), new("LFE", -4), new("Ls", 0, 12.3), new("Rs", 10, 50)],
+            Speakers = [new("L", -1.5, .25, Small: false), new("R", 2), new("C", 0, 3.5), new("LFE", -4), new("Ls", 0, 12.3), new("Rs", 10, 50)],
             BassManagement = true, CrossoverHz = 100, LfeGain = false
         };
         var stereo = SpeakerCalibration.Flat(SpeakerLayout.Stereo, five.DeviceId, "Speakers") with { Speakers = [new("L", -20), new("R")] };
@@ -998,7 +1073,7 @@ try
         })
             Throws<InvalidDataException>(() => CalibrationStore.Validate(bad));
         Throws<InvalidDataException>(() => CalibrationStore.Validate(new CalibrationFile { Profiles = [five, five with { CrossoverHz = 60 }] }));
-        foreach (var json in new[] { "{", "{\"Version\":2,\"Profiles\":[]}", first.Replace("\"Surround51\"", "\"Quad\""), first.Replace("\"Rs\"", "\"Rb\"") })
+        foreach (var json in new[] { "{", "{\"Version\":3,\"Profiles\":[]}", first.Replace("\"Surround51\"", "\"Quad\""), first.Replace("\"Rs\"", "\"Rb\"") })
         {
             File.WriteAllText(path, json);
             Throws<InvalidDataException>(() => CalibrationStore.Load(path));
@@ -1018,6 +1093,23 @@ try
         Check(delays.SequenceEqual([0, 1.46, 0]), $"Delays from distances, got {string.Join(", ", delays)}");
         Equal(SpeakerCalibration.DelaysFromDistances([20, 0]).Max(), SpeakerCalibration.MaxDelayMs); // 58 ms is capped
         Throws<ArgumentOutOfRangeException>(() => SpeakerCalibration.DelaysFromDistances([1, -1]));
+    });
+    Test("Version 1 calibrations default every main to Small and upgrade only on save", () =>
+    {
+        var path = Path.Combine(root, "calibration-v1.json");
+        const string legacy = """
+            {"Version":1,"Profiles":[{"DeviceId":"legacy","Layout":"Surround51","BassManagement":true,
+            "Speakers":[{"Speaker":"L"},{"Speaker":"R"},{"Speaker":"C"},{"Speaker":"LFE"},{"Speaker":"Ls"},{"Speaker":"Rs"}]}]}
+            """;
+        File.WriteAllText(path, legacy);
+        var loaded = CalibrationStore.Load(path);
+        Equal(File.ReadAllText(path), legacy);
+        Equal(loaded.Version, 2);
+        Check(loaded.Profiles.Single().Speakers.All(s => s.Small), "Missing Small keeps the previous all-mains crossover");
+        CalibrationStore.Save(path, loaded);
+        Equal(CalibrationStore.Load(path).Version, 2);
+        Equal(File.ReadAllText(path + ".bak"), legacy);
+        Check(File.ReadAllText(path).Contains("\"Version\": 2"), "New files use schema 2 so older builds cannot ignore Large settings");
     });
 }
 finally { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); Directory.Delete(root, recursive: true); }

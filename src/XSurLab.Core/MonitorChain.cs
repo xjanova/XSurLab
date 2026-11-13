@@ -5,8 +5,8 @@ namespace XSurLab.Core;
 /// (or a test signal) and is never part of an export. A flat calibration passes every sample through unchanged.
 /// </summary>
 /// <remarks>
-/// Bass management is a fourth-order Linkwitz–Riley crossover: every main speaker is high-passed, the low-passed sum of the
-/// mains joins LFE on the subwoofer, and the two halves add back to a flat magnitude. Changes ramp over 20 ms like the mixer;
+/// Bass management is a fourth-order Linkwitz–Riley crossover: Small speakers are high-passed and their low-passed signals
+/// join LFE on the subwoofer. Large speakers keep their full range. Changes ramp over 20 ms like the mixer;
 /// a delay change crossfades from the old to the new tap. When the source ends, the delayed speakers play out their delay.
 /// </remarks>
 public sealed class MonitorChain : IAudioSource
@@ -18,6 +18,7 @@ public sealed class MonitorChain : IAudioSource
     private SpeakerCalibration published;
     private SpeakerCalibration active;
     private readonly double[] gain, gainStep, frame;
+    private readonly double[] small, smallStep;
     // The tap heard now, the tap it is fading from, and the tap the calibration asks for. A change that arrives during a
     // crossfade waits for it to end, so there are never more than two taps and never a jump.
     private readonly int[] delay, previousDelay, targetDelay;
@@ -28,8 +29,8 @@ public sealed class MonitorChain : IAudioSource
     // Crossover coefficients (b0, b1, b2, a1, a2) for the high- and low-pass halves, ramped like the track EQ.
     private readonly double[] high = new double[Taps], highTarget = new double[Taps], highStep = new double[Taps];
     private readonly double[] low = new double[Taps], lowTarget = new double[Taps], lowStep = new double[Taps];
-    // Two cascaded sections per main speaker, then two for the summed low end: x1, x2, y1, y2 each.
-    private readonly double[] highHistory, lowHistory = new double[8];
+    // Two cascaded sections per main speaker in each half: x1, x2, y1, y2 each.
+    private readonly double[] highHistory, lowHistory;
 
     public int SampleRate => source.SampleRate;
     public int Channels => channels;
@@ -58,8 +59,10 @@ public sealed class MonitorChain : IAudioSource
         lineLength = Frames(SpeakerCalibration.MaxDelayMs) + 1;
         lines = new double[channels * lineLength];
         gain = new double[channels]; gainStep = new double[channels]; frame = new double[channels];
+        small = new double[channels]; smallStep = new double[channels];
         delay = new int[channels]; previousDelay = new int[channels]; targetDelay = new int[channels];
         highHistory = new double[channels * 8];
+        lowHistory = new double[channels * 8];
         lastSeeks = source.Seeks;
         published = active = Check(calibration ?? SpeakerCalibration.Flat(layout));
         Settle();
@@ -80,11 +83,12 @@ public sealed class MonitorChain : IAudioSource
     private double BassTarget => canBass && active.BassManagement ? 1 : 0;
     private double LfeTarget => active.LfeGain ? Math.Pow(10, 10 / 20d) : 1;
     private double GainTarget(int c) => active.Speakers[c].TrimDb == 0 ? 1 : Math.Pow(10, active.Speakers[c].TrimDb / 20);
+    private double SmallTarget(int c) => active.Speakers[c].Small ? 1 : 0;
 
     // Jumps straight to the active calibration: at the start, before any audio has been heard.
     private void Settle()
     {
-        for (int c = 0; c < channels; c++) { gain[c] = GainTarget(c); delay[c] = previousDelay[c] = targetDelay[c] = Frames(active.Speakers[c].DelayMs); }
+        for (int c = 0; c < channels; c++) { gain[c] = GainTarget(c); small[c] = SmallTarget(c); delay[c] = previousDelay[c] = targetDelay[c] = Frames(active.Speakers[c].DelayMs); }
         bass = BassTarget; lfeGain = LfeTarget;
         Design(active.CrossoverHz);
         Array.Copy(highTarget, high, Taps); Array.Copy(lowTarget, low, Taps);
@@ -99,6 +103,7 @@ public sealed class MonitorChain : IAudioSource
         for (int c = 0; c < channels; c++)
         {
             gainStep[c] = (GainTarget(c) - gain[c]) / rampFrames;
+            smallStep[c] = (SmallTarget(c) - small[c]) / rampFrames;
             targetDelay[c] = Frames(calibration.Speakers[c].DelayMs);
             delayPending |= targetDelay[c] != delay[c];
         }
@@ -121,12 +126,12 @@ public sealed class MonitorChain : IAudioSource
     {
         if (--rampLeft == 0)
         {
-            for (int c = 0; c < channels; c++) gain[c] = GainTarget(c);
+            for (int c = 0; c < channels; c++) { gain[c] = GainTarget(c); small[c] = SmallTarget(c); }
             bass = BassTarget; lfeGain = LfeTarget;
             Array.Copy(highTarget, high, Taps); Array.Copy(lowTarget, low, Taps);
             return;
         }
-        for (int c = 0; c < channels; c++) gain[c] += gainStep[c];
+        for (int c = 0; c < channels; c++) { gain[c] += gainStep[c]; small[c] += smallStep[c]; }
         bass += bassStep; lfeGain += lfeGainStep;
         for (int i = 0; i < Taps; i++) { high[i] += highStep[i]; low[i] += lowStep[i]; }
     }
@@ -204,12 +209,13 @@ public sealed class MonitorChain : IAudioSource
         {
             if (c == lfe) continue;
             double x = frame[c];
-            sum += x;
             double y = Section(high, highHistory, c * 8, Section(high, highHistory, c * 8 + 4, x));
-            if (bass != 0) frame[c] = x + bass * (y - x);
+            double sub = Section(low, lowHistory, c * 8, Section(low, lowHistory, c * 8 + 4, x));
+            sum += small[c] * sub;
+            double blend = bass * small[c];
+            if (blend != 0) frame[c] = x + blend * (y - x);
         }
-        double sub = Section(low, lowHistory, 0, Section(low, lowHistory, 4, sum));
-        if (bass != 0) frame[lfe] = kept + bass * (kept * lfeGain + sub - kept);
+        if (bass != 0) frame[lfe] = kept + bass * (kept * lfeGain + sum - kept);
     }
 
     private static double Section(double[] q, double[] history, int h, double x)

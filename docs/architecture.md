@@ -84,17 +84,22 @@ estimate is within one period in exclusive mode.
 `WasapiPlayback` plays any `IAudioSource`. The app wraps the mixer (or, in the calibration window, a `TestSignal`)
 in a `MonitorChain` built for the monitor layout: the session layout, or Stereo for the fold-down. A calibration
 belongs to one output (endpoint ID) and one layout and lives in `%APPDATA%\XSurLab\calibration.json`, never in a
-session. Loading validates the version, size (1 MiB), speaker names and order, trim −20…+10 dB, delay 0–50 ms and
+session. Loading accepts calibration schema 1 and 2 and validates size (1 MiB), speaker names and order, trim −20…+10 dB, delay 0–50 ms and
 the crossover; saving writes a sibling temporary file and swaps it in with `File.Replace`, keeping the previous file
 as `.bak`. A file that cannot be read is left in place and the monitor plays flat; the first save after that copies
 it to `calibration.json.unreadable-<time>` before replacing it, so rotating `.bak` cannot lose it.
+Each main or height speaker has a `Small` flag (default true, including in schema 1 files). Large speakers keep
+their full range and contribute no redirected bass. The flag is ignored for LFE and when bass management is off
+or bypassed for test noise. Loading does not rewrite a file; saving writes schema 2 and keeps the previous file
+as `.bak`. Older builds reject schema 2 rather than silently ignoring Large settings.
 
 Per frame the chain runs bass management, then trim, then a per-speaker delay line rounded to whole samples. Bass
-management is a fourth-order Linkwitz–Riley crossover (two Butterworth biquads per half): every main speaker is
-high-passed, the low-passed sum of the mains joins LFE on the subwoofer, optionally with the +10 dB in-band LFE gain,
+management is a fourth-order Linkwitz–Riley crossover (two Butterworth biquads per half): each Small speaker is
+high-passed, the sum of the Small speakers' low-passed signals joins LFE on the subwoofer, optionally with the +10 dB in-band LFE gain,
 and high plus low add back to a flat magnitude (allpass). LFE is not low-passed again. The filters always run, so
 switching bass management on has no start-up transient; while it is off, every sample passes unchanged, and a flat
-calibration is bit-exact.
+calibration is bit-exact. Each main has its own high- and low-pass histories; the Small/Large blend ramps over
+20 ms after filtering, so changing size cannot inject an abrupt change into the subwoofer's filter input.
 
 The UI publishes a calibration as an immutable record; the audio thread ramps trims, the bass-management blend, the
 LFE gain and the crossover coefficients over 20 ms. A delay change crossfades from the old tap to the new one over
@@ -166,7 +171,7 @@ The test harness generates its own fixtures and always deletes its own temporary
 
 1. ASIO output, measured round-trip latency, and microphone-assisted calibration (level, distance, room EQ).
 2. Automation, clip trim/split/fades, bus routing and dynamics.
-3. Up/downmix workspace, per-speaker large/small bass management and binaural monitoring.
+3. Up/downmix workspace and binaural monitoring (per-speaker Small/Large bass management is implemented).
 4. Licensed encoder integrations (DTS family) after their APIs and terms are verified.
 
 The design prototype is a reference, not a claim that its eight workspaces have native implementations.
